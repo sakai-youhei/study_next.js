@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import Box from "@/components/Box";
+import NavigationHooks from "@/components/NavigationHooks";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -18,16 +20,28 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({
+  header,
   children,
+  modal,
 }: Readonly<{
+  header: React.ReactNode;
   children: React.ReactNode;
+  modal: React.ReactNode;
 }>) {
   return (
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col" suppressHydrationWarning>
+        <Box>
+          <span>Root Layout</span>
+          {header}
+          <NavigationHooks />
+          {children}
+          {modal}
+        </Box>
+      </body>
     </html>
   );
 }

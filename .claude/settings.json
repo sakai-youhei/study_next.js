@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /Users/sakaiyouhei/projects/next.js/my-app-/postcss.config.*)",
+      "Read(//Users/sakaiyouhei/projects/next.js/**)",
+      "Read(//Users/sakaiyouhei/**)",
+      "Bash(find ~/. \\\\\\( -name 'package-lock.json' -o -name 'yarn.lock' -o -name 'pnpm-lock.yaml' \\\\\\) -not -path '*/node_modules/*' -exec grep -l 'plain-crypto-js' {} \\\\;)",
+      "Bash(find ~/. \\\\\\( -name 'package-lock.json' -o -name 'yarn.lock' -o -name 'pnpm-lock.yaml' \\\\\\) -not -path '*/node_modules/*' -exec grep -l 'axios.*1\\\\.14\\\\.1\\\\|axios.*0\\\\.30\\\\.4' {} \\\\;)",
+      "Read(//Library/LaunchAgents/**)",
+      "Bash(xargs -I{} basename {})",
+      "Bash(code --list-extensions)"
+    ]
+  }
+}
