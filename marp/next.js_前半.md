@@ -1959,102 +1959,231 @@ export default function Page() {
 
 # この章で学ぶこと
 
-- Next.js が4層のキャッシュをどう使い分けているかを把握する
-- **Request Memoization** で `Prop Drilling` を回避できる理由を理解する
-- **Data Cache / Full Route Cache** がDB・サーバー負荷をどう減らすかを学ぶ
-- **Client Route Cache** とプリフェッチが画面遷移をどう速くするかを知る
+- Next.js が4層のキャッシュを **どこに・どれくらいの期間・誰のため** に持つかを把握する
+- **Request Memoization** で `Prop Drilling` を廃止し「必要な場所で `fetch`」設計が成立する理由を理解する
+- **Data Cache** の永続性と、`revalidateTag` / `revalidatePath` で **手動破棄** できる仕組みを学ぶ
+- **Full Route Cache** が Static Rendering と連携して **SC 実行をゼロ** にする仕組みを理解する
+- **Client Route Cache** とプリフェッチが画面遷移を **瞬時化** する仕組みを知る
+- 4層が連携してリクエストを処理する **全体の流れ** を追える
 
-> 💡 用語の前提：**メモ化（Memoization）** = 同じ計算結果を覚えておいて再利用する技法／ **Prop Drilling** = 親→子→孫…と props をバケツリレーして渡すこと
-
----
-
-## 6-1. Next.js のキャッシュ思想
-
-Next.js はデフォルトで **「可能な限りすべてをキャッシュする」** という思想で設計されています。
-
-特別なインフラ不要で、フレームワークが**4つのキャッシュ機構**を自動運用します。
-
-| # | キャッシュ層 | 保存場所 | 範囲 |
-|---|---|---|---|
-| 1 | **Request Memoization** | サーバーメモリ | 1リクエスト内 |
-| 2 | **Data Cache** | サーバーファイル | リクエスト跨ぎ・永続 |
-| 3 | **Full Route Cache** | サーバーファイル | ページ全体（HTML+Payload） |
-| 4 | **Client Route Cache** | ブラウザメモリ | 画面遷移間 |
+> 💡 用語の前提：**メモ化（Memoization）** = 同じ計算結果を覚えておいて再利用する技法／ **Prop Drilling** = 親→子→孫…と props をバケツリレーして渡すこと／ **revalidate** = キャッシュを再検証して更新すること
 
 ---
 
-## 6-2. Request Memoization
+## 6-1. Next.js のキャッシュ思想 — なぜ4層も必要なのか
 
-同一リクエスト内で**同じURLへの `fetch` が複数回呼ばれても、通信は1回だけ**。
+> Next.js は **「可能な限りすべてをキャッシュする」** 思想。重い処理を繰り返さずに済むよう、**4層が住み分け**して取りこぼしをなくす
+
+**そもそも「キャッシュ」って何？**
+
+データや計算結果を**一時保存しておいて、次に同じものが要求されたら再計算せず即返す仕組み**。再計算 / 通信 / DB問い合わせの**省略** = 速度とコストの最適化
+
+**4層は「保存場所」と「生存期間」が違う：**
+
+| # | 層 | 保存場所 | 範囲 | 生存期間 |
+|---|---|---|---|---|
+| 1 | **Request Memoization** | サーバーメモリ | 1リクエスト内 | 数百ミリ秒 |
+| 2 | **Data Cache** | `.next/cache/` ファイル | 全ユーザー横断 | 永続（手動 or `revalidate`） |
+| 3 | **Full Route Cache** | `.next/server/app/` ファイル | ページ全体 | ビルド or `revalidate` まで |
+| 4 | **Client Route Cache** | ブラウザメモリ | 同一ユーザーの遷移間 | タブを閉じるまで |
+
+> 💡 上から下に進むほど **生存期間が長く・範囲が広く** なる。短期1層と長期3層の組み合わせで、用途別に最適化される
+
+---
+
+## 6-2. Request Memoization — 同一リクエスト内の `fetch` 重複排除
+
+> 同じURLへの `fetch` を**1ページ内に何回書いても、サーバーへの実通信は1回だけ**
+
+### 💡 本プロジェクトの実例：`/request-memorization` ページ
 
 ```tsx
-async function ComponentA() {
-  const res = await fetch('https://api.example.com/user/1'); // ① 実際の通信
-  return <div>{(await res.json()).name}</div>;
+// src/app/(practice)/request-memorization/page.tsx
+<Box>
+  <DynamicServerDataFetch />   {/* 👈 ① fetch('/todos/random') */}
+  <RequestMemorization />      {/* 👈 ② fetch('/todos/random') ← 同じURL */}
+</Box>
+
+// 両SCの中身は同じ fetch（RequestMemorization.tsx / DynamicServerDataFetch.tsx）
+await fetch("https://dummyjson.com/todos/random", { cache: "no-store" });
+```
+
+→ 画面には **2つとも同じid・同じtodo** が表示される（実通信は1回だから）
+
+### 🔍 `fetch` が呼ばれた時の探索フロー（Static / Dynamic 共通）
+
+```
+fetch('/todos/random') 実行
+   ↓
+① Memoization（このリクエスト内のメモリ）を確認
+    ├─ HIT  → 💾 即返却（通信ゼロ）✅
+    └─ MISS ↓
+② Data Cache（.next/cache の永続キャッシュ）を確認 ※ no-store ならスキップ
+    ├─ HIT  → 💾 即返却 ✅
+    └─ MISS ↓
+③ 🌐 サーバーへ実通信 → 結果を Memoization & Data Cache に保存
+```
+
+> 🔑 **`fetch` は必ず①→②→③の順でキャッシュを探す**。Memoization が最初に当たる最も内側の壁
+> ⚠️ **Client Component（CC）は対象外**。同じURLでも CC からの fetch は別途通信が走る
+
+---
+
+## 6-3. Data Cache — 実コード `DataCache2.tsx` で実感する
+
+> Memoization と違い、**ユーザー・時間帯を跨いで**データを使い回す。`.next/cache/` に物理ファイルとして永続保存
+
+```tsx
+// src/components/DataCache2.tsx
+const DataCache2 = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 5000));  // 👈 重い処理シミュ(5秒)
+  const res = await fetch("https://dummyjson.com/todos/random", {
+    cache: "force-cache",   // 👈 デフォルト。.next/cache/ に保存される
+  });
+  return <Box>{/* todo を表示 */}</Box>;
+};
+```
+
+**動作：** 初回は5秒待たされる → 2回目以降（別ユーザー含む）は `.next/cache/` からHITで**瞬時** ⚡
+
+**fetch オプションでキャッシュ挙動が変わる：**
+
+| オプション | Data Cache の挙動 |
+|---|---|
+| `cache: 'force-cache'`（デフォルト） | 保存・無期限で再利用 |
+| `cache: 'no-store'` | 保存しない（毎回新規通信） |
+| `next: { revalidate: 60 }` | 60秒で期限切れ → 自動再取得 |
+
+> 💡 重い集計や外部 API 通信を **全ユーザー共通で1回だけ** 行えば済む。DB通信をほぼゼロに削減
+
+---
+
+## 6-3-2. 📦 補足：Data Cache はいつ書き込まれる？
+
+> 結論：**ビルド時にも書き込まれる**。Static ページなら全ユーザー分が事前に用意される
+
+**Static か Dynamic かで SC（と中の `fetch`）が走るタイミングが変わる：**
+
+| レンダリング種別 | SCの実行タイミング | Data Cache への書き込み |
+|---|---|---|
+| 🏗️ **Static**（`○`） | **ビルド時に1回だけ** | ビルド時に `.next/cache/fetch-cache/` へ保存 → デプロイに同梱 |
+| 🚀 **Dynamic**（`ƒ`） | **リクエスト毎に毎回** | 1回目のリクエストで保存、以降HIT |
+
+**何が Static / Dynamic を決める？** SC内の `fetch` や API 利用で**自動判定**：
+
+```tsx
+fetch('...')                              // 🏗️ Static（force-cache がデフォルト）
+fetch('...', { next: { revalidate: 60 } })// 🏗️ Static（ISR）
+fetch('...', { cache: 'no-store' })       // 🚀 Dynamic
+cookies() / headers() / searchParams      // 🚀 Dynamic
+```
+
+→ ひとつでも Dynamic 要素が混ざるとページ全体が Dynamic 扱いに切り替わる
+
+> 🔑 **Static = ビルド時に作り置き、Dynamic = 注文ごとに調理**（飲食店の比喩）
+
+---
+
+## 6-4. Data Cache の手動破棄 — `DataCache1.tsx` のタグ運用
+
+> 「投稿が編集された」「在庫が変わった」など、**自動更新を待たず手動で無効化**したい場面に使う
+
+```tsx
+// ① src/components/DataCache1.tsx — fetch にタグを付与
+const res = await fetch(url, { cache: "force-cache", next: { tags: ["todo"] } });
+
+// ② Server Action — 書き込み後に該当タグを破棄
+'use server';
+import { revalidateTag } from 'next/cache';
+export async function updateTodo(id: number, data: TodoData) {
+  await db.todo.update({ where: { id }, data });
+  revalidateTag('todo');  // 👈 "todo" タグの全キャッシュを破棄
 }
-
-async function ComponentB() {
-  const res = await fetch('https://api.example.com/user/1'); // ② メモリから返す
-  return <div>{(await res.json()).email}</div>;
-}
 ```
 
-> Props のバケツリレー（**Prop Drilling** = 親→子→孫…と props を延々と渡し続けること）が不要に。データが必要な場所で直接 `fetch` を書ける設計が可能になります（※SC のみ有効）
+| 破棄API | 対象 | 使う場面 |
+|---|---|---|
+| `revalidatePath('/blog')` | 指定パスのキャッシュ | 特定ページだけ更新 |
+| `revalidateTag('todo')` | タグ付き fetch キャッシュ | 横断的に関連データを破棄 |
+| `updateTag('todo', value)` | タグキャッシュを差分更新 | より細かい制御（Next.js 15+） |
+
+> 🔑 自動キャッシュは「**書き込み**」のタイミングで手動破棄を呼ぶ。これがないと古いデータが残る
 
 ---
 
-## 6-3. Data Cache
+## 6-5. Full Route Cache — ページ全体を「作り置き」しておく仕組み
 
-`force-cache`（デフォルト）を使うと、**異なるユーザー・異なる時間帯を跨いで**データを永続キャッシュします。
+> Static ページの**完成済みHTMLをサーバーに保存**し、リクエストが来たらそのまま返す
+
+### 🍱 例えるなら「定食の作り置き」
 
 ```
-初回アクセス:
-  fetch → 外部API/DB からデータ取得 → .next/cache/ に保存
+[Dynamic ページ]（注文ごとに調理）
+👤 リクエスト → 🖥️ SC実行 → 🗄️ DB問い合わせ → HTML生成 → 返却
 
-2回目以降:
-  fetch → キャッシュから即返却（外部への通信ゼロ）
+[Static ページ + Full Route Cache]（作り置き済み）
+🏗️ ビルド時に1回だけ調理 → 💾 完成HTMLを保存
+👤 リクエスト → 💾 保存品をそのまま返却 ⚡（SC実行ゼロ・DB通信ゼロ）
 ```
 
-> ニュースサイトの「アクセスランキング」など、全ユーザー共通の重い集計データのDBクエリをほぼゼロに削減できます
+### 🤔 全ページがキャッシュされる？ → Static のみ
+
+| ページ種別 | キャッシュ | 具体例 |
+|---|:-:|---|
+| **Static**（`○`） | ✅ ビルド時に作り置き | Aboutページ・ブログ記事・静的な商品ページ |
+| **Dynamic**（`ƒ`） | ❌ 毎回調理 | マイページ・検索結果・カート |
+
+→ 「**全員に同じHTMLを返せるか？**」が Static / Dynamic の分かれ目
+
+### 🔄 作り置きを捨てるタイミング
+
+`revalidatePath('/about')` 呼び出し（手動）／`revalidate: 60` 期限切れ（自動）／次のデプロイ時
+
+> 🔑 全員に同じものを返せるページは **SC実行ゼロ・DB通信ゼロ** で配信できる究極の高速化
 
 ---
 
-## 6-4. Full Route Cache
+## 6-6. Client Route Cache — リンクが「ほぼ瞬時」になる仕組み
 
-Static Rendering のページは、ビルド時に構築された**HTML + RSC Payload をサーバーにファイル保存**します。
+> ブラウザのメモリに表示済み・先読み済みのページを保存しておく仕組み
+
+### 🎯 体感の違い
 
 ```
-リクエスト到着
-  ↓
-Full Route Cache を確認
-  ├─ HIT  → 保存済みHTMLをそのまま返す（サーバー処理ゼロ）
-  └─ MISS → サーバーコンポーネントを実行してHTMLを構築
+普通のサイト  : クリック → 🌐 通信 → 白画面 → ロード(0.3〜1秒) → 表示
+Next.js<Link> : ホバー → 🔮 先読み → クリック → ⚡ 即表示（通信ゼロ）
 ```
 
-> Dynamic Rendering（`cookies()` 等を使用）のページはスキップされます
+### ✅ キャッシュが効く3つの場面
+
+| シーン | 動作 |
+|---|---|
+| ホバー → クリック | 先読み済みのデータで即表示 |
+| 戻る／進むボタン | メモリから即復元（再fetch不要） |
+| 30秒〜5分以内に再訪問 | キャッシュHIT |
+
+**やることは1つ — `<a>` を `<Link>` に変えるだけ：**
+
+```tsx
+import Link from 'next/link';
+<Link href="/products/123">商品を見る</Link>  // 先読み＋キャッシュが自動で効く
+```
+
+> 💡 保持時間は `next.config.js` の `staleTimes` で調整可能
 
 ---
 
-## 6-5. Client Route Cache
+## 6-7. 4層キャッシュ連携 — 1リクエストの旅
 
-ブラウザのメモリに RSC Payload をキャッシュし、**画面遷移を瞬時に**します。
+> リクエストがブラウザから DB手前まで進む過程で、**各層がHIT/MISSを判定し合う**。上の層でHITすれば処理終了
 
-- **戻る/進むボタン**: サーバーに再リクエストせず、メモリから即座に復元
-- **`<Link>` のプリフェッチ**: リンクが画面に見えた瞬間、裏でリンク先の Payload を先読みして保存
-
-> クリックした時点でデータはすでにブラウザにある → 待ち時間ゼロで遷移完了
-
----
-
-## 6-6. 4層キャッシュ：リクエストの旅
-
-```
+```text
 ① Client Route Cache（ブラウザ）
-     HIT → 即表示 ✅
+     HIT → 即表示 ✅（外との通信ゼロ）
      ↓ MISS
 ② Full Route Cache（サーバー）
-     HIT → 保存済みHTMLを返す ✅
-     ↓ MISS（Dynamic ページ）
+     HIT → 保存済みHTMLを返す ✅（SC実行ゼロ）
+     ↓ MISS（Dynamicページ or 期限切れ）
 ③ Request Memoization（同一リクエスト内）
      HIT → メモリの結果を返す ✅
      ↓ MISS（初回 fetch）
@@ -2064,6 +2193,8 @@ Full Route Cache を確認
    外部API / DB に実際の問い合わせ
 ```
 
+> 🔑 **より上の層でHITするほど速い**。開発者が意識しなくても、`fetch` を書いて Static Rendering にするだけで全層が自動連携する
+
 ---
 
 <!-- _class: summary -->
@@ -2072,10 +2203,12 @@ Full Route Cache を確認
 
 **キャッシュアーキテクチャの真髄**
 
-- **Request Memoization**: Prop Drilling を廃止。コンポーネントが必要な場所で直接 `fetch` を書ける美しい設計へ
-- **Data Cache + Full Route Cache**: DB・バックエンドへの過剰アクセスをブロック。限られたスペックで大量トラフィックを捌ける
-- **Client Route Cache**: `<Link>` の自動プリフェッチとの連携で、ページ遷移のローディングを消し去る
-- **結論**: 4層のキャッシュがブラウザからDBの手前まで完璧に連携することで、**最速のUXと最強のコストパフォーマンスを同時に実現**している
+- **キャッシュ思想**: 「可能な限り全てキャッシュ」がデフォルト。**4層が住み分け**して取りこぼしを防ぐ
+- **Request Memoization**: 1リクエスト内の同一URL `fetch` を自動排除。**Prop Drillingを廃止**し「必要な場所で取る」設計が成立
+- **Data Cache**: `.next/cache/` に物理保存される全ユーザー横断の永続キャッシュ。**`revalidateTag` / `revalidatePath` で手動破棄** も可能
+- **Full Route Cache**: Static ページの HTML+Payload を `.next/server/app/` に事前保存。**SC 実行ゼロで配信**
+- **Client Route Cache**: ブラウザメモリで Payload キャッシュ。**`<Link>` プリフェッチで遷移を瞬時化**
+- **結論**: 4層が連携することで **DB通信ゼロ・SC実行ゼロ・遷移待ちゼロ** の究極のUXが成立する
 
 ---
 
