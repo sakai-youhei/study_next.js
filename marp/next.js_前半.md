@@ -2224,177 +2224,536 @@ import Link from 'next/link';
 
 # この章で学ぶこと
 
-- `page.tsx` / `layout.tsx` / `loading.tsx` / `error.tsx` の役割を区別できる
-- `loading.tsx` が自動で `<Suspense>` になる仕組みを理解する
-- **Dynamic Segments** `[id]` で動的なURLを実装できる
+- `page.tsx` / `layout.tsx` / `loading.tsx` / `error.tsx` / `not-found.tsx` / `global-error.tsx` の役割を区別できる
+- `layout.tsx` の `children` props で「枠は変えず中身だけ差し替える」設計を理解する
+- `loading.tsx` が自動で `<Suspense>` に、`error.tsx` が `<ErrorBoundary>` になる仕組みと **発動シーン**を把握する
+- **Dynamic Segments** `[id]` で無限のURLを**1ファイル**で処理できる
 - **Route Groups / Parallel Routes / Intercepting Routes** の使いどころを知る
-- `route.ts` と `middleware.ts` でフルスタック構成が組めることを理解する
+- `route.ts` で API、`middleware.ts` で全リクエスト前処理、`public/` で静的ファイル配信
+- 本プロジェクトの実フォルダ構成と各ファイルの実装を読める
 
 > 💡 用語の前提：**規約は設定に勝る (Convention over Configuration)** = 細かい設定を書かずに「決まったファイル名」だけで動くようにする思想
 
 ---
 
-## 7-1. 「規約は設定に勝る」という設計思想
+## 7-1. 「規約は設定に勝る」— 予約ファイル名で全てが組み上がる
 
-特定の名前のファイルを置くだけで、フレームワークが裏側で自動的に複雑な設定を組み上げます。
+> 決まった名前のファイルを置くだけで、フレームワークが裏側で `<Suspense>` / `<ErrorBoundary>` / Router 等の複雑な配線を**自動で**組み上げる
 
-| ファイル名 | 役割 |
-|---|---|
-| `page.tsx` | そのURLのメインUI |
-| `layout.tsx` | 複数ページ共通のレイアウト |
-| `loading.tsx` | ローディング中のUI（Suspense フォールバック） |
-| `error.tsx` | エラー発生時のUI（Error Boundary） |
-| `not-found.tsx` | 404ページ |
-| `route.ts` | バックエンドのAPIエンドポイント |
+### 📁 本プロジェクトの実フォルダ構成
+
+```text
+src/
+├── middleware.ts                    ← 全リクエスト前の関所
+└── app/
+    ├── layout.tsx                   ← サイト全体共通レイアウト
+    ├── loading.tsx                  ← ルート全体の読み込み中UI
+    ├── not-found.tsx                ← 404画面
+    ├── page.tsx                     ← URL: /
+    ├── @header/                     ← Parallel Route（並列ペイン）
+    ├── @modal/                      ← Parallel Route（モーダル）
+    ├── api/sample/route.ts          ← APIエンドポイント /api/sample
+    └── (practice)/                  ← Route Group（URLには出ない）
+        ├── streaming-ssr/
+        │   ├── layout.tsx           ← セグメント専用レイアウト
+        │   ├── loading.tsx          ← 〃 ローディング
+        │   ├── error.tsx            ← 〃 エラー画面
+        │   └── page.tsx
+        └── static-rendering/[id]/page.tsx   ← Dynamic Segment
+```
+
+> 🔑 React 単体だと自分で配線するもの全てを、**ファイル名だけで完成**させる思想
 
 ---
 
-## 7-2. `layout.tsx` の真価：ネストと状態の保持
+## 7-2. `layout.tsx` — 全画面共通の枠を作る
 
-`layout.tsx` は、そのディレクトリ以下の全ての `page.tsx` に適用される共通レイアウトを定義します。`src/app/layout.tsx` にヘッダーを書けば、サイト全域に適用されます。
+> ディレクトリ以下すべての `page.tsx` を子として包む共通枠。**画面遷移しても再レンダリングされず、状態が保持される**
 
 ```tsx
-// 💡 layout.tsx の基本形（children に子ページが流し込まれる）
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+// src/app/layout.tsx — ルート（全画面に適用される）
+export default function RootLayout({
+  header,    // 👈 @header/page.tsx の中身（Parallel Route）
+  children,  // 👈 通常の page.tsx がここに入る
+  modal,     // 👈 @modal/page.tsx の中身
+}) {
   return (
-    <html lang="ja">
+    <html lang="en">
       <body>
-        <Header /> {/* 全画面共通のヘッダー */}
-        <main>{children}</main> {/* ここに各 page.tsx が入る */}
+        <Box>
+          <span>Root Layout</span>
+          {header}
+          <NavigationHooks />
+          {children}        {/* ← 各ページのUIが流し込まれる */}
+          {modal}
+        </Box>
       </body>
     </html>
   );
 }
 ```
 
-> `layout.tsx` の最大の特性は **「画面遷移時に再レンダリングされない」** こと。`children` の部分だけ書き換わり、ヘッダーやBGMの状態はそのまま保持されます。
+**ネスト可能：** `src/app/(practice)/streaming-ssr/layout.tsx` を置けば、その配下のページにだけ追加の枠が適用される
+
+> 🔑 状態保持の威力：`<NavigationHooks />` の状態・スクロール位置・動画再生などが、**遷移しても止まらない／飛ばない**
 
 ---
 
-## 7-3. `loading.tsx` は自動化された `<Suspense>`
+## 7-2-2. 補足：`children` ってなに？ — 「中身を後から差し込める箱」
 
-`loading.tsx` を置くだけで、Next.js が裏側で自動的に `<Suspense>` を組み上げます。
+> 開始タグと閉じタグの**間に書いた中身**が `children` という名前で渡される仕組み
 
 ```tsx
-// /app/users/loading.tsx を置くだけ
-export default function Loading() {
-  return <div>読み込み中...</div>;
+// 📦 箱を作る側（受け取る）
+function MyBox({ children }) {
+  return <div className="border">{children}</div>;  // 👈 ここに差し込まれる
 }
+
+// 🎁 箱を使う側（中身を渡す）
+<MyBox>Hello!</MyBox>           // children = "Hello!"
+<MyBox><h1>タイトル</h1></MyBox>  // children = <h1>タイトル</h1>
 ```
 
-```tsx
-// Next.js が裏で自動生成する構造
-<Layout>
-  <Suspense fallback={<Loading />}>
-    <Page />
-  </Suspense>
-</Layout>
+### 🎯 `layout.tsx` の場合：URLに応じて children が自動で差し替わる
+
+```
+URL: /about           URL: /products
+┌─────────────┐      ┌─────────────┐
+│ Header      │      │ Header      │  ← 変わらない
+├─────────────┤  →   ├─────────────┤
+│ AboutPage   │      │ ProductPage │  ← children だけ差し替わる
+├─────────────┤      ├─────────────┤
+│ Footer      │      │ Footer      │  ← 変わらない
+└─────────────┘      └─────────────┘
 ```
 
-> `<Suspense>` を手書きしなくても、ファイルを置くだけでストリーミングSSRが有効になります
+→ `/about` なら `app/about/page.tsx`、`/products/123` なら `app/products/[id]/page.tsx` の中身が自動で入る
+
+> 🔑 「**枠は変えず、中身だけ差し替える**」仕組み。だから遷移しても Header 等の状態が保持される
 
 ---
 
-## 7-4. `error.tsx` による部分的クラッシュ防止
+## 7-3. `loading.tsx` — 「読み込み中…」を自動表示
 
-`error.tsx` を置くと `<ErrorBoundary>` が自動適用されます。
+> 重いページがロード中の間、**白画面の代わりに表示するUI**。ファイル名で自動配線
 
-```tsx
-"use client"; // error.tsx は必ず Client Component
-export default function Error({ error, reset }: { error: Error; reset: () => void }) {
-  return (
-    <div>
-      <h2>エラーが発生しました</h2>
-      <p>{error.message}</p>
-      <button onClick={() => reset()}>再読み込み</button>
-    </div>
-  );
-}
+**🤔 何が嬉しい？（DBから3秒かかるページの例）**
+
+```
+なし: 👤クリック → 😰 白画面で3秒待つ → 🎉 表示
+あり: 👤クリック → ⏳「読み込み中…」 → 🎉 表示  （Header/Footer は即表示）
 ```
 
-> エラーが起きた部分だけ差し替え。親の `layout.tsx`（ヘッダー等）は無傷のまま表示され、`reset()` でその箇所だけ再実行できます
-
----
-
-## 7-5. 特殊ルーティング①：Dynamic Segments `[id]`
-
-フォルダ名を `[ ]` で囲むと、URLの一部を変数として受け取れます。
+**💻 やることは1つ — この名前でファイルを置くだけ：**
 
 ```tsx
-// src/app/users/[id]/page.tsx
-export default function UserDetailPage({ params }: { params: { id: string } }) {
-  return <h1>ユーザーID: {params.id}</h1>; // /users/123 → params.id = "123"
-}
+// src/app/loading.tsx
+const RootLoadingPage = () => <Box>Root Loading....</Box>;
+export default RootLoadingPage;
 ```
 
-> デフォルトは Dynamic Rendering。`generateStaticParams` を使えばビルド時に全パターンを Static Rendering（事前生成）できます
-
----
-
-## 7-6. 特殊ルーティング②：Route Groups `(folder)`
-
-`( )` で囲んだフォルダはURLに**反映されない**。ページをグループ化し、異なるレイアウトを適用できます。
+**階層別に切り替え可能：**
 
 ```text
 src/app/
- ├── (marketing)/
- │    ├── layout.tsx       ← マーケティング用レイアウト
- │    └── about/page.tsx   → URL: /about
- │
- └── (app)/
-      ├── layout.tsx       ← アプリ用レイアウト（サイドバー付き）
-      └── dashboard/page.tsx → URL: /dashboard
+├── loading.tsx                          ← 全ページのデフォルト
+└── (practice)/streaming-ssr/loading.tsx ← /streaming-ssr 専用
 ```
+
+> 🔑 ファイル1つで「重い処理中のUX」が完成
 
 ---
 
-## 7-7. 特殊ルーティング③：Parallel Routes `@folder`
+## 7-3-2. 補足：`loading.tsx` はどうやってトリガーされる？
 
-`@` をつけたフォルダが自動的に `layout.tsx` の props として渡り、**1画面に複数の独立ペイン**を配置できます。
+> SC内の `await` が待ち中か？を React Suspense の仕組みで Next.js が監視している
+
+```
+👤 アクセス → 🖥️ SC実行 → ⏸️ await中（ペンディング）→ ⏳ loading.tsx 表示
+                                                  → 🎉 await完了で結果に差し替え
+```
+
+**🎯 表示される条件：**
+
+| 場面 | loading表示？ |
+|---|:-:|
+| SC内で `await fetch / db.query` | ✅ |
+| `await new Promise(setTimeout, 3秒)` | ✅ |
+| 同期的なSC（awaitなし） | ❌（そもそも待ち時間ゼロ） |
+| Client Component (`"use client"`) | ❌（対象外） |
+
+**🧪 本プロジェクトの実例：**
 
 ```tsx
-// src/app/dashboard/layout.tsx
-export default function DashboardLayout({ children, analytics, team }) {
+// src/components/DelayServerDataFetch.tsx（/streaming-ssr で使用）
+await new Promise(r => setTimeout(r, 3000));  // 👈 3秒スリープ中、loading表示
+```
+
+> 🔑 Next.js は loading.tsx を見つけたら配下の page.tsx を**自動で `<Suspense fallback>` でラップ**するだけ
+
+---
+
+## 7-4. `error.tsx` — エラー時に「ごめんなさい画面」を出す
+
+> 一部でエラーが起きても**そこだけ差し替え**。Header等は無傷のまま（白画面回避）
+
+```
+[なし] 😱 SC内で throw → 全画面が真っ白！ Header/Sidebar も消える
+[あり] 🛡️ エラー部分だけ「ごめんなさい+再試行ボタン」に差し替え。他は無傷
+```
+
+```tsx
+// src/app/(practice)/streaming-ssr/error.tsx
+'use client'   // 👈 必須（クライアント側で動かす）
+export default function StreamingSsrError({
+  error,           // 👈 投げられたエラー情報
+  unstable_retry,  // 👈 押すとSCが再実行される（再fetch→再描画）
+}) {
   return (
-    <div>
-      <main>{children}</main>
-      <aside>{analytics}</aside> {/* @analytics/page.tsx */}
-      <aside>{team}</aside>      {/* @team/page.tsx */}
-    </div>
-  );
+    <Box>
+      <p>{error.message}</p>
+      <button onClick={() => unstable_retry()}>Try again</button>
+    </Box>
+  )
 }
 ```
 
-> 各ペインに独自の `loading.tsx` / `error.tsx` を置けるため、1つが失敗しても他に影響しません
+→ `page.tsx` 内で `throw new Error(...)` した時、Header は残ったまま中身だけ切替
+
+> 🔑 ボタンで**そのセクションだけ再描画**。ページ全リロード不要
 
 ---
 
-## 7-8. 特殊ルーティング④：Intercepting Routes `(..)`
+## 7-4-2. `error.tsx` vs `global-error.tsx` — 守備範囲の違い
 
-アプリ内遷移時のみモーダルで表示し、直接アクセス・リロード時はフルページで表示する高度なUIパターン。
+> `error.tsx` は Header残しで**中身だけ**守る。Header自体が壊れたら `global-error.tsx` の出番
 
 ```
-タイムラインから写真クリック → 背景を残したまま モーダルで表示
-URL を直接入力 / リロード    → 全画面の写真詳細ページとして表示
+🛡️ error.tsx → ┌─ Header（無傷）─┐         普段はこっち
+                │  ❌ Pageだけ差替 │
+                └──────────────────┘
+🛡️ global-error.tsx → ❌ <html>ごと差替（Headerも消える）  最終手段
 ```
 
-Parallel Routes（`@modal`）と組み合わせることで、状態管理ライブラリなしで**URLと完全同期したモーダルUI**を構築できます。
+```tsx
+// src/app/global-error.tsx
+'use client'
+export default function GlobalError({ error, unstable_retry }) {
+  return (<html><body>      {/* 👈 必須！layout自体を置き換えるから */}
+    <p>{error.message}</p>
+    <button onClick={() => unstable_retry()}>Try again</button>
+  </body></html>)
+}
+```
+
+| ファイル | カバー範囲 | 発動場面 |
+|---|---|---|
+| `error.tsx` | layout の children 以下 | page/SC のエラー |
+| `global-error.tsx` | `<html>` から全部 | layout 自体のエラー |
+
+> 🔑 普段は `error.tsx`、layout が壊れた時の最終防衛線が `global-error.tsx`
 
 ---
 
-## 7-9. `route.ts` と `middleware.ts`
+## 7-4-3. 発動シーン例 — どんな時にどっちが出る？
 
-**`route.ts`（Route Handlers）**
-`page.tsx` の代わりにJSONを返すAPIエンドポイント。`src/app/api/users/route.ts` → `/api/users` になります。
+> 「エラーが起きた場所が **layoutの中身 or layout自体** か」で発動ファイルが決まる
 
-**`middleware.ts`**
-全リクエストが `page.tsx` / `route.ts` に到達する「前」に実行される関所。
+### 🛡️ `error.tsx` が出る代表例（layoutの中身でエラー）
 
-- 未ログインユーザーをログイン画面へリダイレクト
-- アクセスログの取得
-- ABテストの出し分け
+| シーン | 発動 |
+|---|:-:|
+| `page.tsx` の SC で `await fetch` が500/タイムアウト | ✅ |
+| DB接続失敗・Prisma クエリ失敗（SC内） | ✅ |
+| `notFound()` 呼出 | ❌ → not-found.tsx へ |
 
-> 別サーバー不要。Next.js 1つでフロントからAPIまで完結します
+```tsx
+// src/app/products/page.tsx — error.tsx 発動の典型
+const ProductsPage = async () => {
+  const res = await fetch('/api/products');
+  if (!res.ok) throw new Error('商品取得失敗');  // 👈 error.tsx発動
+};
+```
+
+### 💥 `global-error.tsx` が出る代表例（layout自体でエラー）
+
+| シーン | 発動 |
+|---|:-:|
+| `layout.tsx` の SC で fetch 失敗（共通設定取得など） | ✅ |
+| Provider 初期化失敗（認証/テーマプロバイダ等） | ✅ |
+
+> 🔑 layout は error.tsx の**外側**。layoutで投げると error.tsx は守れない
+
+---
+
+## 7-5. `not-found.tsx` — 404画面を任意の場所に配置
+
+> 存在しないURLへのアクセス、または `notFound()` 関数が呼ばれた時に自動表示
+
+### 🎯 発動シーン
+
+| シーン | 例 |
+|---|---|
+| 存在しないURL | `/no-such-page` にアクセス → 自動発動 |
+| データが見つからない | DB に該当 ID なし → `notFound()` を呼ぶ |
+| 認可失敗 | 本プロジェクト：トークン不正なら 404 へ飛ばす |
+
+```tsx
+// src/app/not-found.tsx — ルートの404画面
+const NotFoundPage = () => <Box><span>Not Found Page</span></Box>;
+export default NotFoundPage;
+```
+
+**手動発動の実例（本プロジェクト）：**
+
+```tsx
+// src/app/(practice)/static-rendering/page.tsx
+import { notFound } from "next/navigation";
+const token = (await cookies()).get("token")?.value;
+if (token !== "abc") notFound();   // 👈 トークン不正で 404 画面へ
+```
+
+> 🔑 「データが見つからない／権限がない」を **try/catch なしで簡潔に404化**できる
+
+---
+
+## 7-6. Dynamic Segments `[id]` — 無限のURLを1ファイルで対応
+
+> 商品ID・ユーザー名など**動的な値**をURLから受け取って同じテンプレートで処理する
+
+### 🤔 なぜ必要？ — 1万商品のECサイトの場合
+
+```
+なし: products/1/, 2/, 3/, …, 10000/page.tsx 😰 1万ファイル！
+あり: products/[id]/page.tsx  ← 1ファイルで全商品OK ✨（/products/123 も /abc も処理）
+```
+
+### 💻 本プロジェクトのコード
+
+```tsx
+// src/app/(practice)/static-rendering/[id]/page.tsx
+export default async function Page({ params }: {
+  params: Promise<{ id: string }>   // 👈 Next.js 15+ は Promise!
+}) {
+  const { id } = await params       // 👈 await で取り出す
+  return <Box>ID: {id}</Box>
+}
+```
+
+| 他のパターン | フォルダ |
+|---|---|
+| `/blog/2026/05/title`（複数階層を配列で受取） | `blog/[...slug]/`（catch-all） |
+
+> 💡 `generateStaticParams` でビルド時に全パターン Static 化可能
+
+---
+
+## 7-7. Route Groups `(folder)` — URLに反映されないグループ化
+
+> `( )` で囲んだフォルダは**URLに含まれない**。レイアウト共有・論理分類に使う
+
+### 🎯 こんな時に使う
+
+| 課題 | Route Group での解決 |
+|---|---|
+| LPとログイン後で異なるレイアウトにしたい | `(marketing)/` と `(app)/` に分ける |
+| URLは `/about` のままで階層を整理したい | `(marketing)/about/page.tsx` |
+| 練習用と本番ページを分けたい | 本プロジェクトの `(practice)/` がこれ |
+| 認証ページ群をまとめたい | `(auth)/login`, `(auth)/signup` |
+
+**本プロジェクトの実例：**
+
+```text
+src/app/
+├── page.tsx                            → URL: /
+└── (practice)/                         ← URLに出ない
+    ├── streaming-ssr/page.tsx          → URL: /streaming-ssr
+    └── static-rendering/page.tsx       → URL: /static-rendering
+```
+
+→ `(practice)` で「練習用」と整理しつつ、URLは綺麗なまま
+
+> 🔑 **URLは綺麗なまま、レイアウトを役割で切り分けられる**。SaaS系で頻出
+
+---
+
+## 7-8. Parallel Routes `@folder` — 1画面に複数ページを同時表示
+
+> 通常 1URL = page.tsx 1つだけ。`@`付きフォルダなら**同じURLで複数のpage.tsxを並べて表示**できる
+
+### 🤔 何が嬉しい？（Slackみたいな画面の例）
+
+```
+通常: 1つの巨大な page.tsx に全部詰める 😰
+@付き: サイドバー / メイン / 通知 を 別ファイル に分けて並べる ✨
+```
+例：📊 ダッシュボード／🪟 URLでヘッダー切替
+
+### 💻 仕組み：`@フォルダ名` が layout.tsx の引数として届く
+
+```tsx
+// src/app/layout.tsx
+export default function RootLayout({ header, children, modal }) {
+  // 👆 @header / @modal の中身がここに届く
+  return <Box>{header}{children}{modal}</Box>;
+}
+```
+
+```text
+src/app/@header/dynamic-rendering/page.tsx   ← /dynamic-rendering時のみ表示
+src/app/@modal/(.)intercepting-route/page.tsx
+```
+
+> 🔑 1URLに**複数の独立ページを共存**させられる仕組み
+
+---
+
+## 7-8-2. 本プロジェクトで Parallel Routes が動く瞬間
+
+> `@header/dynamic-rendering/page.tsx` だけ存在 → `/dynamic-rendering` の時だけ header が表示される
+
+```tsx
+// src/app/layout.tsx — 引数を受け取って並べる側
+export default function RootLayout({ header, children, modal }: Readonly<{
+  header: React.ReactNode;     // 👈 @header から届く
+  children: React.ReactNode;   // 👈 通常の page.tsx から届く
+  modal: React.ReactNode;      // 👈 @modal から届く
+}>) {
+  return <Box>{header}<NavigationHooks />{children}{modal}</Box>;
+}
+// src/app/@header/dynamic-rendering/page.tsx — header に届く実体
+const DynamicRenderingHeader = () => <Box>Dynamic Rendering Header</Box>;
+```
+
+**📝 型のポイント：** `React.ReactNode` = JSX/文字列/Componentなど **画面に描画できるもの全部** を表す型
+
+| URL | header | children | modal |
+|---|:-:|:-:|:-:|
+| `/` | – | `app/page.tsx` | – |
+| `/dynamic-rendering` | ✅ DynamicRenderingHeader | 本体 | – |
+| `/intercepting-route`（リンク） | – | フルページ | ✅ モーダル |
+| `/intercepting-route`（直） | – | フルページ | – |
+
+> 🔑 **`@フォルダ` も `page.tsx` と同じURLルーティング**。URL一致時だけ中身が引数に届く
+
+---
+
+## 7-9. Intercepting Routes `(..)` — 同じURLで「2つの表示」を出し分け
+
+> 本プロジェクトでは：`/static-rendering` の **「Go to Intercepting Route」リンク**をクリックすると🪟モーダルで重なり、同じ `/intercepting-route` を**ブラウザでリロード／直接URL入力**すると📄フルページが出る、という動作を**1つのURLで**実現している
+
+### 🎬 本プロジェクトでの動作
+
+```
+① /static-rendering で「Go to Intercepting Route」をクリック → 🪟 モーダルが重なる
+② そのまま F5 リロード or URL直入力 → 📄 フルページに切替わる
+```
+
+### 💻 仕組み — 同じURLに「2つの page.tsx」が用意されている
+
+```tsx
+// src/app/(practice)/intercepting-route/page.tsx ─ 📄 フルページ版（直アクセス時）
+const InterceptingRoutePage = () => <Box>Intercepting Route Page</Box>;
+
+// src/app/@modal/(.)intercepting-route/page.tsx ─ 🪟 モーダル版（リンク経由で横取り）
+const InterceptingRouteModal = () => (
+  <div className='fixed inset-0 bg-black/50 ...'>
+    <div className='bg-white p-4'><h2>Intercepting Route Modal</h2></div>
+  </div>
+);
+```
+
+→ サイト内 `<Link>` で来た時だけ `@modal` 側が**フルページの代わりに**起動
+
+> 🔑 `(.)` 同階層 / `(..)` 1つ上 / `(..)(..)` 2つ上を横取り。**URL同期モーダルUI**が状態管理なしで実現
+
+---
+
+## 7-10. `route.ts` — Next.js 内蔵のAPIエンドポイント
+
+> `page.tsx` が「画面」を返すのに対し、`route.ts` は **JSON等のデータ**を返すバックエンドAPI
+
+### 🎯 こんな時に使う（HTTPリクエストでデータをやり取り）
+
+| ユースケース | 発動契機 |
+|---|---|
+| CCから `fetch('/api/...')` で取得 | ブラウザからAJAX |
+| 外部サービスからの webhook 受信 | Stripe決済通知など |
+| モバイルアプリ用 API | スマホアプリからの呼出 |
+
+```ts
+// src/app/api/sample/route.ts → URL: /api/sample
+import prisma from "../../../../lib/prisma";
+
+export async function GET() {                          // GET /api/sample
+  return Response.json(await prisma.user.findMany());
+}
+
+export async function POST(request: Request) {         // POST /api/sample
+  const { name, email } = await request.json();
+  await prisma.user.create({ data: { name, email } });
+  return Response.json({ message: "作成しました" }, { status: 201 });
+}
+```
+
+> 🔑 **別バックエンド不要**。Prisma で DB 直接アクセス、フロント+APIが1プロジェクトで完結
+
+---
+
+## 7-11. `middleware.ts` — 全リクエストの前に走る「関所」
+
+> `page.tsx` / `route.ts` に到達する**前**に毎回実行される。`matcher` で対象URLを指定
+
+### 🎯 発動タイミング & よくある使い道
+
+```
+👤 リクエスト → 🚦 middleware → ✅条件OK → page.tsx/route.ts 実行
+                                ❌NG    → リダイレクト/拒否
+```
+
+| 用途 | 実装イメージ |
+|---|---|
+| 未ログイン者をログイン画面へ | `if (!cookies.get('token')) → /login` |
+| ABテスト出し分け | ヘッダー/CookieでURL書換 |
+| アクセスログ収集 | 全リクエストを記録 |
+| BOT/不正検出 | UAやIPでフィルタ |
+
+```ts
+// src/middleware.ts — 本プロジェクト：「/」を「/static-rendering」へ
+import { NextResponse } from 'next/server'
+export function middleware(request: NextRequest) {
+  return NextResponse.redirect(new URL('/static-rendering', request.url))
+}
+export const config = { matcher: '/' }   // 👈 ルート(/)のみ対象
+```
+
+> 🔑 page.tsx 自体に手を入れずに**横断的処理を差し込める**。SC実行コストもゼロ
+
+---
+
+## 7-12. `public/` ディレクトリ — 静的ファイルをURLで配信
+
+> `public/` 配下のファイルは**そのままURLでアクセスできる**静的アセット置き場
+
+### 🎯 何を置く？
+
+| 種類 | 例 |
+|---|---|
+| 画像 | `public/logo.png` → URL: `/logo.png` |
+| favicon / OGP画像 | `public/favicon.ico` / `public/og.png` |
+| SEO用 | `robots.txt`, `sitemap.xml` |
+| ダウンロード | `public/manual.pdf` |
+
+### 💻 本プロジェクトの実例
+
+```tsx
+// src/app/(practice)/images/page.tsx
+import Image from 'next/image'
+<Image src="/150x150.png" width={150} height={150} alt="..." />
+//      👆 /public/150x150.png が「/150x150.png」でアクセス可能
+```
+
+> 🔑 `public/` のファイルは **`/ファイル名`** でアクセス。`next/image` で自動最適化（WebP変換・遅延読込・layout shift防止）
 
 ---
 
@@ -2404,7 +2763,8 @@ Parallel Routes（`@modal`）と組み合わせることで、状態管理ライ
 
 **規約がもたらす設計の統一と拡張性**
 
-- **予約ファイルによる自動化**: `loading.tsx` / `error.tsx` を置くだけで `<Suspense>` / `<ErrorBoundary>` が自動適用。設定ゼロで堅牢なアーキテクチャが手に入る
-- **高度なUIパターンの標準化**: Route Groups・Parallel Routes・Intercepting Routes により、ダッシュボードやURL同期モーダルがディレクトリ構成だけで表現できる
-- **真のフルスタック**: `route.ts` でAPI構築、`middleware.ts` でリクエスト制御。1プロジェクトで全てが完結
+- **予約ファイルによる自動化**: `loading.tsx` / `error.tsx` / `not-found.tsx` / `global-error.tsx` を置くだけで `<Suspense>` / `<ErrorBoundary>` / 404・root エラーハンドラが自動適用
+- **`children` propsの設計**: `layout.tsx` が枠を提供し、URLに応じて**中身だけ差し替わる**ことで状態を保ったまま遷移できる
+- **柔軟なルーティング**: Dynamic Segments `[id]` で**無限URLを1ファイル**でカバー、Route Groups・Parallel Routes・Intercepting Routes で**ダッシュボードやURL同期モーダル**がディレクトリ構成だけで表現できる
+- **真のフルスタック**: `route.ts` で API（Prisma経由でDB直接アクセス）、`middleware.ts` でリクエスト制御、`public/` で静的アセット配信。1プロジェクトで全てが完結
 - **結論**: App Router の規約は「URLの作り方」ではなく、**世界のベストプラクティスをフォルダ名という直感的なルールに落とし込んだもの**
