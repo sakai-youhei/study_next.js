@@ -74,10 +74,8 @@ style: |
     margin-bottom: 18px;
     letter-spacing: 0.02em;
     line-height: 1.25;
-    background: linear-gradient(135deg, #ffffff 0%, #c4b5fd 40%, #93c5fd 80%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    /* PDFで -webkit-background-clip:text が破綻するため単色化 */
+    color: #ffffff;
   }
   section.title p {
     font-size: 19px;
@@ -101,10 +99,16 @@ style: |
     font-size: 40px;
     font-weight: 900;
     border: none;
-    color: #fff;
+    color: #fff !important;
     margin-bottom: 28px;
     letter-spacing: 0.02em;
     line-height: 1.25;
+    /* PDF出力でASCII部分が紫塊になるのを防ぐ：ベース h1 のグラデ＆テキスト透過を明示値で打ち消し */
+    background: transparent !important;
+    background-image: none !important;
+    -webkit-background-clip: border-box !important;
+    -webkit-text-fill-color: #fff !important;
+    background-clip: border-box !important;
   }
   section.chapter blockquote {
     border-left: 3px solid var(--cyan);
@@ -118,13 +122,12 @@ style: |
   section.chapter blockquote p { margin: 0; }
 
   /* ========== 通常スライド：見出し ========== */
+  /* グラデ付き h1 は各 section.X h1 で個別宣言する（PDF出力時に
+     -webkit-background-clip:text が ASCII で部分失敗するため、ベースには付けない） */
   h1 {
     font-size: 22px;
     font-weight: 700;
-    background: linear-gradient(135deg, var(--violet) 0%, var(--indigo) 50%, #60a5fa 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    color: var(--violet);
     border-bottom: 1px solid var(--border);
     padding-bottom: 10px;
     margin-top: 0;
@@ -268,10 +271,8 @@ style: |
     font-family: 'JetBrains Mono', monospace;
     font-size: 22px;
     font-weight: 900;
-    background: linear-gradient(135deg, var(--pink), var(--violet));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    /* PDFで -webkit-background-clip:text が破綻するため単色化 */
+    color: var(--pink);
     letter-spacing: -0.02em;
   }
 
@@ -283,10 +284,8 @@ style: |
       var(--bg);
   }
   section.objectives h1 {
-    background: linear-gradient(135deg, var(--cyan) 0%, var(--violet) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    /* PDFで -webkit-background-clip:text が破綻するため単色化 */
+    color: var(--cyan);
     border-bottom-color: rgba(167,139,250,0.3);
   }
   section.objectives ul {
@@ -336,10 +335,8 @@ style: |
       var(--bg);
   }
   section.summary h1 {
-    background: linear-gradient(135deg, var(--emerald) 0%, #10b981 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    /* PDFで -webkit-background-clip:text が破綻するため単色化 */
+    color: var(--emerald);
     border-bottom-color: rgba(52,211,153,0.3);
   }
   section.summary blockquote {
