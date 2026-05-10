@@ -207,9 +207,11 @@ style: |
 
   /* ========== テーブル ========== */
   section table {
+    display: table;
     font-size: 13.5px;
     border-collapse: separate;
     border-spacing: 0;
+    table-layout: fixed;
     width: 100%;
     margin: 10px 0 14px;
     border: 1px solid #1e2d45;
