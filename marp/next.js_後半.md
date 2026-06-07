@@ -386,7 +386,7 @@ Next.js（App Router）は標準で **Server Component**（SC：サーバー実�
 // 新: Next.js (SC 内で直接 await prisma.findMany()) ⇄ DB
 ```
 
-> 💡 「フロント」「バック」を別リポジトリで管理する苦労、CORS の設定地獄から解放される
+> 💡 **根本原因：フロントとバックが「別オリジン・別リポジトリ」に分かれているから** CORS 設定もリポジトリ二重管理も発生する。SC は同じサーバー上で動き HTTP 境界をまたがないので、両方とも丸ごと消える
 
 ---
 
@@ -537,7 +537,8 @@ const GetDataFromRouteHandler = () => {
 export default GetDataFromRouteHandler;
 ```
 
-> ⚠️ ステート定義・非同期処理・初回カクつき・無駄な往復通信、と問題が山積み
+> ⚠️ **本質的な問題：データはサーバー(DB)にあるのに、ブラウザ経由でわざわざ取りに戻っている**
+> → 「空 HTML を返す → JS 読込 → API を叩く → やっと描画」の順次通信。初回は必ず空表示（SEO に弱い・カクつく）
 
 ---
 
@@ -561,7 +562,7 @@ const GetDataFromServerComponent = async () => {  // 👈 async!
 export default GetDataFromServerComponent;
 ```
 
-> 🎯 **結論（Read）：** API を作らず SC で直接取得が、コード量・速度・SEO 全方位で最強
+> 🎯 **結論（Read）：** SC なら API 層も client 往復もゼロ。サーバー上で DB→HTML を直接組み立てるので、コードが減り・往復が消え・初回から中身入り HTML（SEO 強）
 
 ---
 
@@ -589,7 +590,8 @@ export async function POST(request: Request) {
 
 ## 8-9. データ作成の苦悩 — Client での泥臭いフォーム実装
 
-> 入力値ステート・JSON 変換・fetch 処理・結果ステート……ボイラープレートまみれ
+> ⚠️ **本質的な問題：保存先の DB はサーバーにあるのに、入力値をわざわざ JSON に詰め直し HTTP API 越しに送り返している**
+> → そのために入力ステート・JSON 変換・fetch・結果ステートが全部手書きに（取得側 8-6 と同じ往復構造）
 
 ```tsx
 // src/components/CreateDataWithRouteHandler.tsx
@@ -673,7 +675,8 @@ export default ActionWithServer;
 
 ## 8-12. Server Component 呼び出しの「弱点」
 
-> **リッチな UX が作れない**。即時バリデーションもローディング表示も不可
+> ⚠️ **本質的な問題：この構成にはブラウザ側で動く JS が無い**
+> → 状態を持てないので「入力中の検証」も「送信中の表示」もできず、サーバー往復が終わるまで画面は無反応
 
 ```tsx
 // 8-11 の構成では…
@@ -684,11 +687,8 @@ export default ActionWithServer;
 // → サーバーに往復 → redirect → 画面リロード → やっとエラーに気付く
 ```
 
-**問題点：**
-- 入力中の即時バリデーション不可・送信中ローディング表示不可
-- `redirect` でスクロール位置がリセット → UX 低下
-
-→ ブラウザ側 JavaScript（Client Component）の力が必要
+> ⚠️ さらに `redirect` 後はページ再読込でスクロール位置もリセット
+> → だからブラウザ側で状態を持つ **Client Component（CC）** が必要
 
 ---
 
@@ -719,7 +719,7 @@ const ActionWithClient = () => {
 };
 ```
 
-> ⚠️ UX 向上したが `loading` / `errors` 等の `useState` が乱立 → 次で解決
+> ⚠️ UX は向上。ただし送信状態(loading)もエラーもサーバーの状態を**手動で複製・同期**している → 抜けや不整合の温床。次で一掃
 
 ---
 
@@ -865,7 +865,7 @@ import Link from "next/link";
 
 ## 9-3. `<Image>` コンポーネントの基本
 
-> 巨大画像は **LCP** 悪化の元凶。`<Image>` が `<img>` を拡張してフレームワークレベルで最適化
+> 巨大画像は **LCP** 悪化の元凶。素の `<img>` は原寸をそのまま配信するから重い。`<Image>` は **配信時に自動リサイズ＋圧縮＋WebP 変換** して「必要なだけの画像」に削る
 
 ```tsx
 // src/app/(practice)/images/page.tsx
@@ -1107,7 +1107,7 @@ await updateItem();
 router.refresh();
 ```
 
-> 💡 `refresh()` は SPA の利便性と SSR の鮮度を両立する隠れた最強メソッド
+> 💡 **`refresh()` の勝ちどころ：ページ全体を再読み込みせず、クライアント state（入力途中のフォーム等）を壊さないまま、サーバー側のデータ（SC）だけを取り直して最新化できる**
 
 ---
 
@@ -1296,7 +1296,7 @@ export const refreshTodo = async () => {
 
 > **キャッシュの完全支配：** `revalidatePath` / `revalidateTag` で多層キャッシュを操り、**爆速とリアルタイム性**を両立
 
-**結論：** 「適切な場所で適切な API を使い分けられる」= **App Router の支配者**
+**結論：** 関数には**動く場所（SC / CC / Server Action）が決まっている**。場所を間違えればエラー、キャッシュ破棄を忘れれば古い表示——**「どこで何が使えるか」を押さえることが、バグらせずに爆速とリアルタイム性を両立する唯一の道**
 
 ---
 
@@ -1412,7 +1412,8 @@ export default async function Dashboard() {
 
 ## 10-5. データ取得の常識を覆す Streaming SSR
 
-> `useEffect` + `useState` 地獄からの**完全脱却**
+> **本質：旧来はブラウザから API を往復して取りに行くから「空表示→取得→再描画」になる**
+> → 新方式は async SC でサーバー側が直接 await。`useEffect` + `useState` の手組みごと不要に
 
 ```tsx
 // 旧（SPA 時代）：useEffect + useState 地獄
@@ -1435,7 +1436,7 @@ async function HeavyPart() {
 
 ---
 
-## 10-6. 宇宙一強力な「4層のキャッシュアーキテクチャ」
+## 10-6. 範囲と速度が違う4層を重ねる「キャッシュアーキテクチャ」
 
 | # | 層 | 保存場所 | 範囲 | 生存期間 |
 |---|---|---|---|---|
