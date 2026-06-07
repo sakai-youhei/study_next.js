@@ -395,28 +395,45 @@ Next.js（App Router）は標準で **Server Component**（SC：サーバー実�
 > **設計図（`schema.prisma`）を書く**段階。テーブル構造を宣言的に記述
 
 ```bash
-npm install prisma --save-dev
-npx prisma init --datasource-provider sqlite  # 👈 ファイルベースDB
+npm i -D prisma && npx prisma init --datasource-provider sqlite
 ```
 
 ```prisma
 // prisma/schema.prisma
-datasource db { provider = "sqlite"; url = env("DATABASE_URL") }
-generator client { provider = "prisma-client-js" }
-
+generator client { provider = "prisma-client"; output = "../src/generated/prisma" }
+datasource db { provider = "sqlite" }
 model User {
   id    Int     @id @default(autoincrement())
   email String  @unique
   name  String?
-  posts Post[]   // 👈 User 1 : N Post の関連
+  posts Post[]
 }
 model Post {
-  id        Int    @id @default(autoincrement())
+  id        Int     @id @default(autoincrement())
   title     String
+  content   String?
+  published Boolean @default(false)
   authorId  Int
-  author    User   @relation(fields: [authorId], references: [id])
+  author    User    @relation(fields: [authorId], references: [id])
 }
 ```
+
+---
+
+## 8-2-2. スキーマ記法の読み方（記号を日本語に翻訳）
+
+> 見慣れない記号も 1 つずつ訳せば、`schema.prisma` は怖くない
+
+| 記法 | 意味 |
+|---|---|
+| `id Int @id` | この列を**主キー**（1 行を見分ける背番号）にする |
+| `@default(autoincrement())` | 作成時に 1, 2, 3… と**自動で連番**を振る |
+| `email String @unique` | **重複禁止**。同じメールは 2 人登録できない |
+| `name String?` | 末尾 `?` ＝**省略可**（空でも OK）。無印は必須 |
+| `posts Post[]` | `[]` ＝「複数の Post を持つ」。**1 User : 多 Post** |
+| `author … @relation` | Post が「どの User のものか」を**外部キー**で紐付け |
+
+> 💡 **主キー** = 各行の背番号／ **外部キー** = 別テーブルの主キーを指す紐付け列。この 2 つで「ユーザー」と「投稿」が線で繋がる
 
 ---
 
@@ -425,26 +442,28 @@ model Post {
 > スキーマを DB に反映 → 初期データを投入する `seed.ts` を用意
 
 ```bash
-npx prisma db push  # 👈 schema.prisma の内容を SQLite に反映
+npx prisma db push  # 👈 schema.prisma を SQLite に反映
 ```
 
 ```ts
 // prisma/seed.ts
-import { PrismaClient } from '@prisma/client'
-const prisma = new PrismaClient()
+import "dotenv/config";
+import { PrismaClient, Prisma } from "../src/generated/prisma/client.js";
+import { PrismaLibSql } from "@prisma/adapter-libsql";
 
-async function main() {
-  await prisma.user.upsert({
-    where: { email: 'alice@prisma.io' },
-    update: {},
-    create: {
-      email: 'alice@prisma.io',
-      name: 'Alice',
-      posts: { create: { title: 'Check out Prisma' } },  // 👈 関連も同時作成
-    },
-  })
+const adapter = new PrismaLibSql({ url: process.env.DATABASE_URL! });
+const prisma = new PrismaClient({ adapter });
+
+const userData: Prisma.UserCreateInput[] = [
+  { name: "Alice", email: "alice@prisma.io",
+    posts: { create: [{ title: "Join the Prisma Discord", published: true }] } },
+  { name: "Bob", email: "bob@prisma.io",
+    posts: { create: [{ title: "Follow Prisma on Twitter", published: true }] } },
+];
+export async function main() {
+  for (const u of userData) await prisma.user.create({ data: u });
 }
-main().then(async () => { await prisma.$disconnect() })
+main();
 ```
 
 ---
@@ -459,16 +478,20 @@ npx prisma studio      # 👈 localhost:5555 で GUI 起動
 ```
 
 ```ts
-// src/lib/prisma.ts
-import { PrismaClient } from '@prisma/client';
+// lib/prisma.ts（注：src/ の外に配置）
+import { PrismaClient } from "../src/generated/prisma/client";
+import { PrismaLibSql } from "@prisma/adapter-libsql";
 
-// 開発中の hot-reload で接続が枯渇しないよう、グローバルに保持
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
-export const prisma = globalForPrisma.prisma || new PrismaClient();
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+const adapter = new PrismaLibSql({ url: process.env.LIBSQL_URL! });
+// 開発中の hot-reload で接続枯渇を防ぐためグローバルに保持
+const prisma = globalForPrisma.prisma || new PrismaClient({ adapter });
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+export default prisma;
 ```
 
-> 💡 これで Next.js のどこからでも `import { prisma } from "@/lib/prisma"` で DB が叩ける
+> 💡 SC や Server Action から `import prisma from "../../lib/prisma"` で DB が叩ける
+> ⚠️ Prisma 7 では seed スクリプトは `prisma.config.ts` に書く（`migrations: { seed: "tsx prisma/seed.ts" }`）。`package.json` への `"prisma"` 追記は旧方式。さらにこの構成は `seed.ts` が `DATABASE_URL`・`prisma.ts` が `LIBSQL_URL` と**別々の変数**を読むので、**`.env` に両方**書く（1 つに統一する方が安全）
 
 ---
 
@@ -478,17 +501,17 @@ if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
 
 ```ts
 // src/app/api/sample/route.ts
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import prisma from "../../../../lib/prisma";
 
 // GET /api/sample
 export async function GET() {
   const users = await prisma.user.findMany();   // 👈 DB から全件取得
-  return NextResponse.json(users);              // 👈 JSON で返す
+  return Response.json(users);                  // 👈 JSON で返す
 }
 ```
 
 > ✅ `http://localhost:3000/api/sample` で JSON が返るようになった。次はフロントから叩く
+> 💡 **Route Handler** = `app` 配下に `route.ts` を置き `GET`/`POST` 関数を export するだけで API になる仕組み。`Response.json(...)` が JSON 応答を作る
 
 ---
 
@@ -497,21 +520,21 @@ export async function GET() {
 > 自作 API を `useState` + `useEffect` + `fetch` で叩く——**冗長なボイラープレート地獄**
 
 ```tsx
+// src/components/GetDataFromRouteHandler.tsx
 "use client";
-import { useState, useEffect } from "react";
-import { User } from "@prisma/client";    // 👈 Prisma 生成の型を流用
+import type { User } from "@/generated/prisma/client";  // 👈 自動生成された型
+import React, { useEffect } from "react";
 
-export default function GetDataFromRouteHandler() {
-  const [users, setUsers] = useState<User[]>([]);   // ① 空のステート
-
-  useEffect(() => {                                  // ② 初回マウントで fetch
+const GetDataFromRouteHandler = () => {
+  const [users, setUsers] = React.useState<User[]>([]);  // ① 空のステート
+  useEffect(() => {                                       // ② 初回マウントで fetch
     fetch("/api/sample")
-      .then((res) => res.json())
-      .then((data) => setUsers(data));
+      .then(res => res.json())
+      .then(data => setUsers(data));
   }, []);
-
-  return <ul>{users.map((u) => <li key={u.id}>{u.name}</li>)}</ul>;
-}
+  return <ul>{users.map(u => <li key={u.id}>{u.name}</li>)}</ul>;
+};
+export default GetDataFromRouteHandler;
 ```
 
 > ⚠️ ステート定義・非同期処理・初回カクつき・無駄な往復通信、と問題が山積み
@@ -525,17 +548,17 @@ export default function GetDataFromRouteHandler() {
 ```tsx
 // src/components/GetDataFromServerComponent.tsx
 // "use client" を書かない → サーバー上で実行
-import { prisma } from "@/lib/prisma";
+import prisma from "../../lib/prisma";
 
-export default async function GetDataFromServerComponent() {  // 👈 async!
-  const users = await prisma.user.findMany();   // 👈 直接DB呼出
-
+const GetDataFromServerComponent = async () => {  // 👈 async!
+  const users = await prisma.user.findMany();      // 👈 直接DB呼出
   return (
     <ul>
-      {users.map((user) => <li key={user.id}>{user.name}</li>)}
+      {users.map(user => <li key={user.id}>{user.name}</li>)}
     </ul>
   );
-}
+};
+export default GetDataFromServerComponent;
 ```
 
 > 🎯 **結論（Read）：** API を作らず SC で直接取得が、コード量・速度・SEO 全方位で最強
@@ -549,19 +572,18 @@ export default async function GetDataFromServerComponent() {  // 👈 async!
 ```ts
 // src/app/api/sample/route.ts に追記
 export async function POST(request: Request) {
-  const body = await request.json();              // ① JSON をパース
-  const { name, email } = body;
-
-  const user = await prisma.user.create({         // ② Prisma で登録
-    data: { name, email },
+  const res = await request.json();           // ① JSON をパース
+  await prisma.user.create({                   // ② Prisma で登録
+    data: { name: res.name, email: res.email },
   });
-
-  return NextResponse.json(                       // ③ 成功レスポンス
-    { message: "ユーザーを作成しました", user },
-    { status: 201 }
-  );
+  return Response.json({                        // ③ 成功レスポンス
+    message: "ユーザーを作成しました",
+    status: 201,
+  });
 }
 ```
+
+> 💡 この `status: 201` は **JSON の中身**であって HTTP ステータスではない（応答コードは 200 のまま）。本当に 201 を返すなら `Response.json(body, { status: 201 })` と第2引数で渡す
 
 ---
 
@@ -570,25 +592,24 @@ export async function POST(request: Request) {
 > 入力値ステート・JSON 変換・fetch 処理・結果ステート……ボイラープレートまみれ
 
 ```tsx
+// src/components/CreateDataWithRouteHandler.tsx
 "use client";
-import { useState } from "react";
+import React from "react";
 
-export default function CreateDataWithRouteHandler() {
-  const [info, setInfo] = useState({ name: "", email: "" });    // ① 入力ステート
-  const [message, setMessage] = useState<string | null>(null);  // ② 結果ステート
-
+const CreateDataWithRouteHandler = () => {
+  const [info, setInfo] = React.useState({ name: "", email: "" });    // ① 入力
+  const [message, setMessage] = React.useState<string | null>(null);  // ② 結果
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const res = await fetch("/api/sample", {                    // ③ POST 送信
+    await fetch("/api/sample", {                                       // ③ POST
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(info),
-    });
-    const data = await res.json();
-    setMessage(data.message);                                   // ④ ステート更新
+    }).then(r => r.json()).then(data => setMessage(data.message));     // ④ 結果格納
   };
-
   return <form onSubmit={handleSubmit}>...</form>;
-}
+};
+export default CreateDataWithRouteHandler;
 ```
 
 ---
@@ -598,26 +619,28 @@ export default function CreateDataWithRouteHandler() {
 > `"use server"` 宣言で、**フロントから直接呼べるバックエンド関数**が誕生
 
 ```ts
-// src/actions/actionCalledServer.ts
+// src/actions/action-called-sever.ts
 "use server";       // 👈 このファイル内の関数はすべてサーバー実行
-import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
+import prisma from "../../lib/prisma";
 
-export async function actionCalledServer(formData: FormData) {
-  // ① FormData から直接入力値を抽出
+export const actionCalledServer = async (formData: FormData) => {
   const name = formData.get("name") as string;
   const email = formData.get("email") as string;
-
-  // ② バリデーション
-  if (!name || !email) redirect("/call-server-action?error=invalid");
-
-  // ③ DB に保存
+  // ① バリデーション（空チェック）
+  if (!name || !email) {
+    redirect(`/call-server-action?errors=empty`);
+  }
+  // ② DB に保存
   await prisma.user.create({ data: { name, email } });
-
-  // ④ 完了後リダイレクト
+  // ③ キャッシュ破棄＋リダイレクト
+  revalidatePath("/get-data-from-server-component");
   redirect("/get-data-from-server-component");
-}
+};
 ```
+
+> 💡 `revalidatePath` で一覧のキャッシュを捨て（→ 9-17）、`redirect` で完了後に画面遷移（→ 9-15）。`"use server"` の関数は**フォームの `action` に直接渡せる**のが核心
 
 ---
 
@@ -628,19 +651,20 @@ export async function actionCalledServer(formData: FormData) {
 ```tsx
 // src/components/ActionWithServer.tsx
 // "use client" を書かない → Server Component
-import { actionCalledServer } from "@/actions/actionCalledServer";
+import { actionCalledServer } from "../actions/action-called-sever";
 
-export default function ActionWithServer() {
+const ActionWithServer = async () => {
   return (
     // 👇 action 属性にサーバー関数を直接渡す！
-    <form action={actionCalledServer}>
+    <form action={actionCalledServer} className="flex flex-col gap-4">
       {/* name 属性 = FormData のキー */}
-      <input type="text" name="name" placeholder="Name" />
-      <input type="text" name="email" placeholder="Email" />
-      <button type="submit">作成</button>
+      <input type="text" name="name" className="border" />
+      <input type="email" name="email" className="border" />
+      <button type="submit" className="border">Create</button>
     </form>
   );
-}
+};
+export default ActionWithServer;
 ```
 
 > 🎯 `useState` も `fetch` も URL 指定も不要。HTML 標準の POST で送信される
@@ -673,24 +697,26 @@ export default function ActionWithServer() {
 > サーバー関数を**普通の async 関数として import** → ハイブリッド構成
 
 ```tsx
+// src/components/ActionWithClient.tsx
 "use client";
-import { useState } from "react";
-import { actionCalledClient } from "@/actions/actionCalledClient";  // 👈 import
+import React from "react";
+import { useRouter } from "next/navigation";
+import { actionCalledClient } from "../actions/action-called-client";
 
-export default function ActionWithClient() {
-  const [loading, setLoading] = useState(false);
-  const [errors, setErrors] = useState<string[]>([]);
-
+const ActionWithClient = () => {
+  const router = useRouter();
+  const [info, setInfo] = React.useState({ name: "", email: "" });
+  const [loading, setLoading] = React.useState(false);
+  const [errors, setErrors] = React.useState<string[]>([]);
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setLoading(true);
-    const formData = new FormData(e.currentTarget);
-    const res = await actionCalledClient(formData);   // 👈 関数として呼ぶ
-    if (!res.success) setErrors(res.errors);
+    const res = await actionCalledClient(info.name, info.email); // 関数として呼ぶ
     setLoading(false);
+    if (res.success) router.push("/static-rendering"); else setErrors(res.errors);
   };
   return <form onSubmit={handleSubmit}>...</form>;
-}
+};
 ```
 
 > ⚠️ UX 向上したが `loading` / `errors` 等の `useState` が乱立 → 次で解決
@@ -702,26 +728,26 @@ export default function ActionWithClient() {
 > サーバーアクションを `(prevState, formData) → State` 形式に書き換える
 
 ```ts
-// src/actions/actionCalledClientWithActionState.ts
+// src/actions/action-called-client-with-action-state.ts
 "use server";
-import { prisma } from "@/lib/prisma";
+import prisma from "../../lib/prisma";
 
-export type State = { success: boolean; errors?: string[] };
+type State = { success: boolean; data: { name: string; email: string }; errors?: string[] };
 
-// 👇 第1引数に prevState（前の状態）が自動で入る
-export async function actionWithState(
-  prevState: State, formData: FormData
-): Promise<State> {
-  const name = formData.get("name") as string;
-  const email = formData.get("email") as string;
-  if (!name || !email) return { success: false, errors: ["必須項目が未入力です"] };
+// 👇 第1引数に _initialState（前の状態）が自動で入る
+export const actionCalledClientWithActionState = async (
+  _initialState: State, formData: FormData
+): Promise<State> => {
+  const name = (formData.get("name") as string) ?? "";
+  const email = (formData.get("email") as string) ?? "";
+  if (!name || !email) return { success: false, data: { name, email }, errors: ["empty"] };
   try {
     await prisma.user.create({ data: { name, email } });
-    return { success: true };
+    return { success: true, data: { name, email } };
   } catch {
-    return { success: false, errors: ["登録に失敗しました"] };
+    return { success: false, data: { name, email }, errors: ["unexpected_error"] };
   }
-}
+};
 ```
 
 ---
@@ -729,28 +755,30 @@ export async function actionWithState(
 ## 8-15. `useActionState` を用いた究極のクライアント実装
 
 ```tsx
+// src/components/ActionWithActionState.tsx
 "use client";
-import { useActionState, useEffect } from "react";
-import { actionWithState, State } from "@/actions/actionWithState";
+import React, { useEffect } from "react";
 import { useRouter } from "next/navigation";
-const initialState: State = { success: false, errors: [] };
+import { actionCalledClientWithActionState } from "@/actions/action-called-client-with-action-state";
 
-export default function ActionWithActionState() {
+const initialState = { success: false, data: { name: "", email: "" }, errors: [] };
+
+const ActionWithActionState = () => {
   const router = useRouter();
   // 👇 [state, formAction, isPending] を一発で取得
-  const [state, formAction, isPending] = useActionState(actionWithState, initialState);
-  useEffect(() => { if (state.success) router.push("/users"); }, [state.success, router]);
+  const [state, formAction, isPending] = React.useActionState(
+    actionCalledClientWithActionState, initialState);
+  useEffect(() => { if (state.success) router.push("/static-rendering"); }, [state.success, router]);
   return (
-    <form action={formAction}>                            {/* 👈 formAction を渡す */}
-      <input type="text" name="name" />
-      <input type="text" name="email" />
-      {state.errors?.map(err => <p key={err}>{err}</p>)}  {/* 👈 即エラー表示 */}
-      <button type="submit" disabled={isPending}>          {/* 👈 送信中は自動無効化 */}
-        {isPending ? "作成中..." : "作成する"}
+    <form action={formAction} className="flex flex-col gap-4">
+      <input type="text" name="name" defaultValue={state.data.name} />
+      <input type="email" name="email" defaultValue={state.data.email} />
+      <button type="submit" disabled={isPending}>
+        {isPending ? "Loading..." : "Create"}
       </button>
     </form>
   );
-}
+};
 ```
 
 ---
@@ -782,11 +810,11 @@ export default function ActionWithActionState() {
 # この章で学ぶこと
 
 - **`<Link>`** の自動プリフェッチ（**先読み**）と、Dynamic Rendering ページの**例外**を理解する
-- **`<Image>`** の `width`/`height`/`fill`/`sizes`/`quality`/`priority` を実装レベルで使い分ける
+- **`<Image>`** の `width`/`height`/`fill`/`sizes`/`quality`/`preload` を実装レベルで使い分ける
 - **DevTools**（ブラウザ開発者ツール／F12 で開く）で `/_next/image` の URL パラメータ・WebP 変換を確認できる
 - 外部画像を扱うときの `remotePatterns` セキュリティ設定を学ぶ
 - `useRouter` / `usePathname` / `useSearchParams` の使い分けと、`redirect` の **try-catch 落とし穴** を把握する
-- `revalidatePath` / `revalidateTag` で **On-Demand ISR**（必要な時だけキャッシュ破棄）を実装する
+- `revalidatePath` / `updateTag`・`revalidateTag` で **On-Demand ISR**（必要な時だけキャッシュ破棄）を実装する
 
 > 💡 用語：**LCP**（最大要素の描画時間）／ **CLS**（レイアウトのガタつき量）は Google の Core Web Vitals 指標で **SEO 評価に直結**。`<Image>` はこれらを自動で改善してくれる
 
@@ -800,7 +828,7 @@ export default function ActionWithActionState() {
 |---|---|---|
 | 種類 | ハードナビ | ソフトナビ |
 | 通信 | 全リソース再 DL | **RSC Payload 差分のみ** |
-| プリフェッチ | なし | **自動**（ビューポート入り時） |
+| プリフェッチ | なし | **自動**（ビューポート入り時／本番ビルドのみ） |
 
 ```tsx
 import Link from "next/link";
@@ -814,24 +842,24 @@ import Link from "next/link";
 
 ---
 
-## 9-2. プリフェッチの例外と `prefetch={true}`
+## 9-2. プリフェッチの「部分」と `prefetch={true}`
 
-> サーバー負荷を考え、**Dynamic Rendering のページはデフォルトでプリフェッチされない**
+> Dynamic Rendering のページは、デフォルトでは**「静的な殻」まで**しか先読みされない（`loading.tsx` 境界の手前まで。重い DB 部分は遷移時）
 
 ```tsx
-// ❌ デフォルトではプリフェッチ対象外
+// ⚠️ デフォルト：loading.tsx までの殻だけ部分プリフェッチ
 <Link href="/dynamic-rendering">動的ページへ</Link>
 
-// ✅ 明示的に有効化（爆速にしたい場合）
+// ✅ ルート全体を先読み（部分→完全プリフェッチに格上げ）
 <Link href="/dynamic-rendering" prefetch={true}>
   Go to ダイナミックレンダリング
 </Link>
 ```
 
-**なぜデフォルト無効？** 動的ページを全部先読みすると、リンクが画面に映る度に DB クエリが走りサーバーが枯渇するため。
+**なぜ全部を先読みしない？** リンクが画面に映る度に DB クエリまで走らせるとサーバーが枯渇するため。
 
 > ⚠️ `prefetch={true}` は本当に頻繁に遷移する画面だけ。乱用すると本末転倒
-> 💡 **Dynamic Rendering** = アクセス毎にサーバーで HTML を作り直すモード（マイページ等、ユーザー別に内容が変わるページに使う）
+> 💡 **Dynamic Rendering** = アクセス毎にサーバーで HTML を作り直すモード／ `loading.tsx` が無ければ動的ルートは先読みされない（完全に切るなら `prefetch={false}`）
 
 ---
 
@@ -840,22 +868,24 @@ import Link from "next/link";
 > 巨大画像は **LCP** 悪化の元凶。`<Image>` が `<img>` を拡張してフレームワークレベルで最適化
 
 ```tsx
-// src/app/practice/images/page.tsx
+// src/app/(practice)/images/page.tsx
+import React from "react";
 import Image from "next/image";
 
-export default function ImagesPage() {
+const ImagesPage = () => {
   return (
-    <div>
-      <h1>Image コンポーネント</h1>
+    <>
+      <h1>Images Page</h1>
       <Image
-        src="/150x150.png"  // public/ 配下のパス
-        width={150}         // 👈 原則必須
-        height={150}        // 👈 原則必須
-        alt="サンプル画像"
+        src="/150x150.png"   // 👈 public/ 配下のパス
+        alt="Sample Image"
+        width={150}           // 👈 原則必須（CLS 防止）
+        height={150}          // 👈 原則必須（CLS 防止）
       />
-    </div>
+    </>
   );
-}
+};
+export default ImagesPage;
 ```
 
 > 💡 `width` / `height` 必須 → 予約スペース確保で **CLS** を完全防止
@@ -908,18 +938,21 @@ DevTools > Network タブ > Img フィルタ
 > 親要素のサイズに合わせて柔軟に伸縮させたい場合は `fill` を使う
 
 ```tsx
+// src/app/(practice)/images/page.tsx より
 // 親要素には position: relative と幅・高さの定義が必須
 <div className="relative w-1/2 h-screen">
   <Image
     src="/150x150.png"
-    alt="レスポンシブ画像"
-    fill                              // 👈 親要素を埋める
-    style={{ objectFit: "cover" }}    // 👈 アスペクト比維持＆トリミング
+    alt="Sample Image"
+    fill                  // 👈 親要素を埋める
+    sizes="50vw"
+    style={{ objectFit: "cover" }}  // 👈 縦横比を保って切り抜き
   />
 </div>
 ```
 
-> 💡 **`position: relative`** = 子要素（`fill` の `<Image>`）の位置基準を親に固定する CSS 指定／ **`objectFit: cover`** = 縦横比を保ったまま親要素を埋める（はみ出した部分は切り取られる）／ **アスペクト比** = 画像の縦横比
+> 💡 **`position: relative`** = `fill` の `<Image>` の位置基準を親に固定する CSS／ **`objectFit:"cover"`** = 縦横比を保って親を埋める（はみ出しは切り取り）
+> ⚠️ Next.js 13 で `objectFit` 単体 prop は**廃止**。今は `style={{ objectFit: "cover" }}` と書くのが正解（古い記事の `objectFit="cover"` は効かない）
 
 ---
 
@@ -928,12 +961,17 @@ DevTools > Network タブ > Img フィルタ
 > `fill` だけだとフルスクリーン用の**巨大画像**（例：1920px）が生成され、スマホユーザーに無駄な大画像を送りつけてしまう。`sizes` で「どのくらいの大きさが必要か」をブラウザに**ヒント**として伝える
 
 ```tsx
-<Image
-  src="/hero.jpg" alt="hero" fill
-  style={{ objectFit: "cover" }}
-  // 👇 1024px 以下 → 画面全体幅、それ以上 → 画面の半分
-  sizes="(max-width: 1024px) 100vw, 50vw"
-/>
+// src/app/(practice)/images/page.tsx より（lg ブレークポイント版）
+<div className="relative w-full lg:w-1/2 h-screen">
+  <Image
+    src="/150x150-2.png"
+    alt="Sample Image"
+    fill
+    style={{ objectFit: "cover" }}
+    // 👇 64rem(=1024px) 以下 → 50vw、それ以上 → 25vw
+    sizes="(max-width: 64rem) 50vw, 25vw"
+  />
+</div>
 ```
 
 **ブラウザの賢い再取得：**
@@ -947,20 +985,21 @@ DevTools > Network タブ > Img フィルタ
 
 ## 9-8. クオリティ制御 `quality` と許可リスト
 
-> 画質を意図的に変える時は `quality` を指定。**ホワイトリストにない値はエラー**
+> 画質を意図的に変える時は `quality` を指定。**許可リスト外の値は最も近い許可値に丸められる**（最適化 URL を直接許可外の値で叩くと 400 エラー）
 
 ```tsx
+// src/app/(practice)/images/page.tsx より
 {/* 高画質：写真ポートフォリオ向け */}
-<Image src="/photo.jpg" width={400} height={300} alt="高画質" quality={100} />
+<Image src="/150x150-3.png" alt="Sample Image" width={150} height={150} quality={100} />
 {/* 低画質：アイコン等の極小画像向け */}
-<Image src="/icon.png" width={32} height={32} alt="低画質" quality={25} />
+<Image src="/150x150-4.png" alt="Sample Image" width={150} height={150} quality={25} />
 ```
 
 ```ts
 // next.config.ts
-const config: NextConfig = {
+const nextConfig: NextConfig = {
   images: {
-    qualities: [25, 75, 100],  // 👈 許可する値を配列で明示
+    qualities: [25, 50, 75, 100],   // 👈 許可する値を配列で明示
   },
 };
 ```
@@ -969,7 +1008,7 @@ const config: NextConfig = {
 
 ---
 
-## 9-9. 遅延読み込みと `priority`
+## 9-9. 遅延読み込みと `preload`
 
 > デフォルトで **Lazy Loading**。画面に近づくまで通信を行わない → LCP 改善
 
@@ -986,9 +1025,11 @@ const config: NextConfig = {
 ```
 
 ```tsx
-{/* ファーストビュー画像は priority で遅延を無効化 */}
-<Image src="/hero.png" width={1200} height={600} alt="ヒーロー" priority />
+{/* ファーストビュー画像は preload で先読み */}
+<Image src="/hero.png" width={1200} height={600} alt="ヒーロー" preload />
 ```
+
+> ⚠️ Next.js 16 で `priority` は**非推奨**。今は `preload`（または `loading="eager"` / `fetchPriority="high"`）を使う
 
 > 💡 **Lazy Loading**（遅延読み込み） = 必要な時まで読み込みを後回しにする技法／ **ヒーロー画像** = ページ最上部のメインビジュアル／ **ファーストビュー** = スクロールせずに最初に見える領域
 
@@ -1004,14 +1045,15 @@ const config: NextConfig = {
 // next.config.ts
 import type { NextConfig } from "next";
 
-const config: NextConfig = {
+const nextConfig: NextConfig = {
   images: {
+    qualities: [25, 50, 75, 100],
     remotePatterns: [
-      { hostname: "placehold.jp" },  // 👈 このドメインだけ処理 OK
+      { protocol: "https", hostname: "placehold.jp" },  // 👈 許可ホスト
     ],
   },
 };
-export default config;
+export default nextConfig;
 ```
 
 > 設定後は開発サーバー再起動。`<Image src="https://placehold.jp/150x150.png" ... />` が動作
@@ -1024,19 +1066,23 @@ export default config;
 > `<Link>` はリンク用。**JS イベント起点の遷移**は `useRouter` を使う
 
 ```tsx
+// src/components/NavigationHooks.tsx
 "use client";  // 👈 フック使用のため必須
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
-export default function NavigationHooks() {
+const NavigationHooks = () => {
   const router = useRouter();
+  const pathname = usePathname();
   return (
-    <div>
-      <button onClick={() => router.push("/static-rendering")}>Push</button>
+    <>
+      <button onClick={() => router.push("/static-rendering")}
+        className={pathname === "/static-rendering" ? "underline" : ""}>Push</button>
       <button onClick={() => router.replace("/static-rendering")}>Replace</button>
       <button onClick={() => router.refresh()}>Refresh</button>
-    </div>
+    </>
   );
-}
+};
+export default NavigationHooks;
 ```
 
 > 💡 **フック（Hook）** = React の機能を関数で借りる仕組み（`use〇〇` 系）／ **`"use client"`** = 「このファイルはブラウザ側で動かす」という宣言。`useState`・`onClick` 等を使うなら必須
@@ -1093,28 +1139,29 @@ export function SearchResult() {
 
 ## 9-14. サーバー専用関数：`cookies`
 
-> SC や Server Actions の中**でのみ動作**。ログイン状態を覚える「**セッショントークン**」の読み書き等に使う
+> Cookie の**読み取り**は SC でもできるが、**書き込み（set / delete）は Server Action か Route Handler の中だけ**（SC のレンダリング中は不可）。ログイン状態を覚える「**セッショントークン**」の読み書き等に使う
 > 💡 **Cookie** = ブラウザに保存される小さなデータ（ログイン状態の保持等に使用）
 
 ```ts
 // src/actions/login.ts（Server Action：書き込み）
 "use server";
+import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
 
-export async function login() {
+export const login = async () => {
   const cookieStore = await cookies();
-  cookieStore.set("token", "ABC");   // 👈 Cookie に保存
-}
+  cookieStore.set("token", "abc");          // 👈 Cookie に保存
+  redirect("/static-rendering");             // 👈 完了後リダイレクト
+};
 ```
 
-```tsx
-// src/app/dashboard/page.tsx（SC：読み取り）
+```ts
+// src/actions/logout.ts
+"use server";
 import { cookies } from "next/headers";
-
-export default async function Dashboard() {
-  const token = (await cookies()).get("token")?.value;
-  return <div>あなたのトークン: {token}</div>;
-}
+export const logout = async () => {
+  (await cookies()).delete("token");         // 👈 Cookie を削除
+};
 ```
 
 > ⚠️ SC で `cookies().get()` を呼ぶと、そのページは**自動的に Dynamic Rendering に切替**
@@ -1140,7 +1187,7 @@ export default async function Dashboard() {
 ```
 
 **`redirect` vs `router.push`：**
-- `redirect`：サーバーで **HTTP 307**（一時的リダイレクトを意味するステータスコード）を返す。**内部で例外を投げる**ため後続コードは実行されない
+- `redirect`：サーバーで **HTTP リダイレクト**を返す（SC からなら 307、**Server Action からなら 303**）。**内部で例外を投げる**ため後続コードは実行されない
 - `router.push`：ブラウザの JavaScript で DOM（画面の構造）を書き換え
 
 ---
@@ -1173,6 +1220,8 @@ export async function createUser(formData: FormData) {
 }
 ```
 
+> 💡 どうしても try の中で呼ぶなら、catch 先頭で `unstable_rethrow(error)`（`next/navigation`）を呼べば redirect / notFound の内部例外だけ正しく素通しできる
+
 ---
 
 ## 9-17. オンデマンド・キャッシュ更新:`revalidatePath`
@@ -1182,47 +1231,52 @@ export async function createUser(formData: FormData) {
 **問題：** Server Action で新規ユーザー保存 → 一覧（`/users`）が Static Rendering なら**古いキャッシュが返り続け**、新ユーザーが表示されない
 
 ```ts
-// src/actions/user.ts
+// src/actions/action-called-sever.ts より抜粋
 "use server";
-import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
+import prisma from "../../lib/prisma";
 
-export async function createUser(formData: FormData) {
-  await prisma.user.create({ data: { /* ... */ } });
+export const actionCalledServer = async (formData: FormData) => {
+  const name = formData.get("name") as string;
+  const email = formData.get("email") as string;
+  await prisma.user.create({ data: { name, email } });
 
-  revalidatePath("/users");   // 👈 /users の Full Route Cache を破棄
-  redirect("/users");         //    次回アクセスで最新 HTML が生成される
-}
+  revalidatePath("/get-data-from-server-component");  // 👈 該当ページのキャッシュ破棄
+  redirect("/get-data-from-server-component");        //    次回アクセスで最新HTML
+};
 ```
 
 > 💡 **Static Rendering** = ビルド時に HTML を完成させてキャッシュする方式（CDN 配信並みに爆速）／ **Full Route Cache** = その完成済み HTML を保管する層／ **ISR** = Incremental Static Regeneration（部分的な静的再生成）
 
 ---
 
-## 9-18. タグによる柔軟なキャッシュ破棄:`revalidateTag`
+## 9-18. タグによる柔軟なキャッシュ破棄:`updateTag`
 
 > 「複数ページに跨る同じデータ」を**横断的に**破棄したい時に使う
 
 ```tsx
-// データ取得時にタグを付ける
-const res = await fetch("https://api.example.com/todos", {
-  next: { tags: ["todos"] },     // 👈 任意のタグ名
+// src/components/DataCache1.tsx より：取得時にタグを付ける
+const res = await fetch("https://dummyjson.com/todos/random", {
+  cache: "force-cache",          // 👈 キャッシュさせる（破棄の対象になる）
+  next: { tags: ["todo"] },      // 👈 このデータに "todo" タグを付与
 });
 ```
 
 ```ts
-// Server Action：タグ指定で一斉破棄
+// src/actions/refresh-todo.ts
 "use server";
-import { revalidateTag } from "next/cache";
+import { updateTag } from "next/cache";  // 👈 v16 新登場。即時無効化＆Server Action 専用
 import { redirect } from "next/navigation";
 
-export async function refreshTodos() {
-  revalidateTag("todos");        // 👈 "todos" 付き全 Data Cache を破棄
-  redirect("/todos");
-}
+export const refreshTodo = async () => {
+  updateTag("todo");                         // 👈 "todo" 付き Data Cache を破棄
+  redirect("/data-cache-1");
+};
 ```
 
-> 💡 多層キャッシュの最終支配者。`revalidatePath`（ページ単位）と使い分け
+> 💡 fetch 側の `tags: ["todo"]` と `updateTag("todo")` は**同じ名前**で対応（ズレると破棄されない）
+> 💡 `updateTag` は `revalidateTag` の改名では**ない別物**：`updateTag`＝即時無効化・Server Action 専用（自分の書き込みを即反映）／`revalidateTag`＝古い内容を返しつつ裏で更新・Route Handler でも可
 
 ---
 
@@ -1293,7 +1347,7 @@ Next.js         ─ サーバーで完全な HTML を組み立てて配信
 
 ```tsx
 // Server Component（デフォルト：サーバー実行・JS 0KB）
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";   // 👈 default import
 export default async function Page() {
   const users = await prisma.user.findMany();
   return <ClientShell><UserList users={users} /></ClientShell>;
@@ -1352,7 +1406,7 @@ export default async function Dashboard() {
 }
 ```
 
-**自動 Dynamic 切替：** `cookies()` / `headers()` / `searchParams` / `fetch(..., { cache: "no-store" })`
+**自動 Dynamic 切替（Request-time API）：** `cookies()` / `headers()` / `searchParams`（`connection()` で明示的に Dynamic 化も可）。`fetch(..., { cache: "no-store" })` は『データのキャッシュ無効化』指定で、Dynamic 切替トリガーとは別物
 
 ---
 
@@ -1393,10 +1447,12 @@ async function HeavyPart() {
 ```ts
 // On-Demand ISR：更新時だけキャッシュを破棄
 revalidatePath("/users");       // ページ単位
-revalidateTag("todo-list");     // タグ横断
+updateTag("todo");              // タグ横断・即時無効化（v16新／revalidateTag とは別物）
 ```
 
 > 💡 4層必要なのは**範囲と速度が違う**から。短期1層（メモリ）と長期3層（ファイル）の組み合わせで、用途別に最適化される
+
+> 💡 発展：v16 は `next.config.ts` の `cacheComponents: true` ＋ 関数/コンポーネント先頭の `'use cache'` で「書いた所だけキャッシュ」する新モデルも持つ。この4層は『従来モデル』として今も有効——まずこちらを理解しよう
 
 ---
 
@@ -1430,8 +1486,8 @@ const [state, formAction, isPending] = useActionState(createUser, initialState);
 ## 10-8. Next.js 特有の強力な組み込み機能群
 
 ```tsx
-// ① <Image>：WebP/AVIF 自動変換・遅延読込・CLS 防止
-<Image src="/hero.jpg" alt="" width={1200} height={600} priority />
+// ① <Image>：WebP 自動変換（AVIF は config で有効化）・遅延読込・CLS 防止
+<Image src="/hero.jpg" alt="" width={1200} height={600} preload />
 
 // ② <Link>：自動プリフェッチ・ソフトナビゲーション
 <Link href="/about" prefetch={true}>About</Link>
