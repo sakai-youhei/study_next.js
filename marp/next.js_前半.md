@@ -727,13 +727,13 @@ src/app/
 ```text
 src/
  └── app/
-      └── practice/
+      └── (practice)/              ← ()付きフォルダは URL に現れない（→ 7-7）
            └── dynamic-rendering/
-                └── page.tsx
+                └── page.tsx      →  /dynamic-rendering
 ```
 
 ```tsx
-// src/app/practice/dynamic-rendering/page.tsx
+// src/app/(practice)/dynamic-rendering/page.tsx
 export default function DynamicRenderingPage() {
   return <h1>ダイナミック レンダリング ページ</h1>;
 }
@@ -2156,15 +2156,15 @@ const res = await fetch(url, { cache: "force-cache", next: { tags: ["todo"] } })
 import { revalidateTag } from 'next/cache';
 export async function updateTodo(id: number, data: TodoData) {
   await db.todo.update({ where: { id }, data });
-  revalidateTag('todo');  // 👈 "todo" タグの全キャッシュを破棄
+  revalidateTag('todo', 'max');  // 👈 v16は第2引数推奨（1引数は非推奨）
 }
 ```
 
 | 破棄API | 対象 | 使う場面 |
 |---|---|---|
 | `revalidatePath('/blog')` | 指定パスのキャッシュ | 特定ページだけ更新 |
-| `revalidateTag('todo')` | タグ付き fetch キャッシュ | 横断的に関連データを破棄 |
-| `updateTag('todo', value)` | タグキャッシュを差分更新 | より細かい制御（Next.js 15+） |
+| `revalidateTag('todo','max')` | タグ付き fetch キャッシュ | 横断的に破棄（1引数は非推奨） |
+| `updateTag('todo')` | タグ付きキャッシュを**即時失効** | Server Action 専用・自分の書き込みを即反映（Next.js 16 新） |
 
 > 🔑 自動キャッシュは「**書き込み**」のタイミングで手動破棄を呼ぶ。これがないと古いデータが残る
 

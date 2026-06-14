@@ -350,6 +350,26 @@ style: |
   section.summary strong { color: var(--emerald); }
 ---
 
+<!-- _class: title -->
+
+# Next.js 完全攻略ハンズオン（後半）
+
+<p>Server Actions・組み込み機能・総まとめ —— 「読む」から「書く」へ</p>
+
+---
+
+<!-- _class: agenda -->
+
+# 後半のアジェンダ
+
+> 前半（1〜7章）で SC / CC・レンダリング・4層キャッシュ・ルーティング規約は習得済み。残るは「**データの書き込み**」とフロント・バック統合——ここからが本番
+
+1. **フロントエンドとバックエンドの統合** — Prisma 導入、API の終焉、Server Actions（第8章）
+2. **Next.js 特有のコンポーネントと関数群** — `<Link>` / `<Image>` / ナビフック / キャッシュ操作（第9章）
+3. **総まとめと次のステップ** — 全体系の振り返りと実力化ロードマップ（第10章）
+
+---
+
 <!-- _class: chapter -->
 
 # 8. フロントエンドとバックエンドの統合
@@ -368,7 +388,7 @@ style: |
 - Server Component と Client Component それぞれからの **Server Actions 呼び出し方** を学ぶ
 - `useActionState` で **複雑な `useState` 地獄** から脱出する書き方を身につける
 
-> 💡 用語の前提：**ORM** = SQL を書かずに DB を操作するライブラリ（Prisma 等）／ **シード（seed）** = ダミーデータの初期投入／ **ボイラープレート** = 毎回書かされる定型コード
+> 💡 用語の前提：**ORM** = SQL を書かずに DB を操作するライブラリ（Prisma 等）／ **シード（seed）** = ダミーデータの初期投入／ **ボイラープレート** = 毎回書かされる定型コード／ **CRUD** = Create・Read・Update・Delete（データ操作の4分類。本章は Read と Create を実装）
 
 ---
 
@@ -392,22 +412,40 @@ Next.js（App Router）は標準で **Server Component**（SC：サーバー実�
 
 ## 8-2. Prisma セットアップ (1) — 初期化とスキーマ定義
 
-> **設計図（`schema.prisma`）を書く**段階。テーブル構造を宣言的に記述
+> **設計図（`schema.prisma`）を書く**段階。必要パッケージを入れて初期化し、テーブル構造を宣言的に記述
 
 ```bash
-npm i -D prisma && npx prisma init --datasource-provider sqlite
+npm i -D prisma tsx && npm i @prisma/client @prisma/adapter-libsql dotenv
+npx prisma init --datasource-provider sqlite  # 👈 prisma/ と .env（DATABASE_URL）を生成
 ```
 
 ```prisma
 // prisma/schema.prisma
-generator client { provider = "prisma-client"; output = "../src/generated/prisma" }
-datasource db { provider = "sqlite" }
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"  // 👈 生成 Client の置き場所（8-3 以降で import するパス）
+}
+datasource db {
+  provider = "sqlite"
+}
 model User {
   id    Int     @id @default(autoincrement())
   email String  @unique
   name  String?
   posts Post[]
 }
+```
+
+> 💡 同時に入れた `tsx`（TS 実行ツール）・`dotenv`・`@prisma/adapter-libsql`（SQLite 接続アダプタ）は 8-3 のシードで使う
+
+---
+
+## 8-2-2. スキーマ記法の読み方（記号を日本語に翻訳）
+
+> 見慣れない記号も 1 つずつ訳せば、`schema.prisma` は怖くない。続きの `Post` モデルを例に読む
+
+```prisma
+// schema.prisma 続き：投稿テーブル（User と 1:多 で紐付く）
 model Post {
   id        Int     @id @default(autoincrement())
   title     String
@@ -417,12 +455,6 @@ model Post {
   author    User    @relation(fields: [authorId], references: [id])
 }
 ```
-
----
-
-## 8-2-2. スキーマ記法の読み方（記号を日本語に翻訳）
-
-> 見慣れない記号も 1 つずつ訳せば、`schema.prisma` は怖くない
 
 | 記法 | 意味 |
 |---|---|
@@ -450,7 +482,6 @@ npx prisma db push  # 👈 schema.prisma を SQLite に反映
 import "dotenv/config";
 import { PrismaClient, Prisma } from "../src/generated/prisma/client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
-
 const adapter = new PrismaLibSql({ url: process.env.DATABASE_URL! });
 const prisma = new PrismaClient({ adapter });
 
@@ -460,11 +491,12 @@ const userData: Prisma.UserCreateInput[] = [
   { name: "Bob", email: "bob@prisma.io",
     posts: { create: [{ title: "Follow Prisma on Twitter", published: true }] } },
 ];
-export async function main() {
-  for (const u of userData) await prisma.user.create({ data: u });
-}
+export async function main() { for (const u of userData) await prisma.user.create({ data: u }); }
 main();
 ```
+
+> 💡 接続先は `.env` の `DATABASE_URL`（8-2 の `init` が生成）。Prisma 7 はアダプタ（`PrismaLibSql`）経由で DB に接続する
+> 💡 リポジトリにある `prisma/migrations/` は `migrate dev` の履歴。学習用は履歴を残さない `db push` で十分
 
 ---
 
@@ -473,7 +505,7 @@ main();
 > シード実行 → GUI で確認 → アプリで使う **PrismaClient インスタンス**を1箇所に集約
 
 ```bash
-npx prisma db seed     # 👈 シード実行（package.json に seed スクリプト追記後）
+npx prisma db seed     # 👈 シード実行（prisma.config.ts の seed 設定が前提・下記⚠️）
 npx prisma studio      # 👈 localhost:5555 で GUI 起動
 ```
 
@@ -491,13 +523,14 @@ export default prisma;
 ```
 
 > 💡 SC や Server Action から `import prisma from "../../lib/prisma"` で DB が叩ける
-> ⚠️ Prisma 7 では seed スクリプトは `prisma.config.ts` に書く（`migrations: { seed: "tsx prisma/seed.ts" }`）。`package.json` への `"prisma"` 追記は旧方式。さらにこの構成は `seed.ts` が `DATABASE_URL`・`prisma.ts` が `LIBSQL_URL` と**別々の変数**を読むので、**`.env` に両方**書く（1 つに統一する方が安全）
+> ⚠️ Prisma 7 の seed 設定は `prisma.config.ts` の `migrations: { seed: "tsx prisma/seed.ts" }` に書く（`package.json` 追記は旧方式）
+> ⚠️ `seed.ts` は `DATABASE_URL`、`prisma.ts` は `LIBSQL_URL` を読む——`.env` に**両方**書く（1 つに統一する方が安全）
 
 ---
 
 ## 8-5. データ読み取り — 旧来の Route Handlers 手法
 
-> 従来の SPA 流：まず `route.ts` で **JSON を返す API** を作る
+> 従来の SPA 流：まず `route.ts` で **JSON を返す API** を作る（前半 7-10 で作った API の続き）
 
 ```ts
 // src/app/api/sample/route.ts
@@ -566,6 +599,28 @@ export default GetDataFromServerComponent;
 
 ---
 
+## 8-7-2. 作った部品を `page.tsx` に置いて URL に出す
+
+> 部品（`src/components/*.tsx`）は単体では画面に出ない。**`app` 配下の `page.tsx` で import → 配置**して初めて URL に表示される
+
+```tsx
+// src/app/(practice)/get-data-from-server-component/page.tsx
+//   👈 フォルダ名がそのまま URL → /get-data-from-server-component
+import GetDataFromServerComponent from "@/components/GetDataFromServerComponent";
+
+const Page = () => (
+  <main>
+    <h1>Users</h1>
+    <GetDataFromServerComponent />   {/* 👈 作った部品を置くだけ */}
+  </main>
+);
+export default Page;
+```
+
+> 💡 **フォルダ構成 = URL**（App Router）。`page.tsx` が「画面」、`src/components/*` が「部品」。8 章で作る部品はすべてこの形で `page.tsx` に配置する（1 ページに複数並べても OK：例 `call-server-action` は 3 つの部品を並べている）
+
+---
+
 ## 8-8. データ作成 — 旧来の Route Handlers 手法
 
 > 取得は解決。次は「フォームから新規登録」を **POST API** で受ける従来型
@@ -584,7 +639,7 @@ export async function POST(request: Request) {
 }
 ```
 
-> 💡 この `status: 201` は **JSON の中身**であって HTTP ステータスではない（応答コードは 200 のまま）。本当に 201 を返すなら `Response.json(body, { status: 201 })` と第2引数で渡す
+> 💡 この `status: 201` は **JSON の中身**であって HTTP ステータスではない（応答コードは 200 のまま）。正しくは第2引数 `Response.json(body, { status: 201 })`——前半 7-10 でやった形だ
 
 ---
 
@@ -630,19 +685,16 @@ import prisma from "../../lib/prisma";
 export const actionCalledServer = async (formData: FormData) => {
   const name = formData.get("name") as string;
   const email = formData.get("email") as string;
-  // ① バリデーション（空チェック）
-  if (!name || !email) {
-    redirect(`/call-server-action?errors=empty`);
+  if (!name || !email) {                                  // ① 空チェック
+    redirect(`/call-server-action?errors=empty_name&errors=empty_email`);
   }
-  // ② DB に保存
-  await prisma.user.create({ data: { name, email } });
-  // ③ キャッシュ破棄＋リダイレクト
-  revalidatePath("/get-data-from-server-component");
-  redirect("/get-data-from-server-component");
+  await prisma.user.create({ data: { name, email } });    // ② DB に保存
+  revalidatePath("/get-data-from-server-component");      // ③ キャッシュ破棄
+  redirect("/get-data-from-server-component");            //    完了後に遷移
 };
 ```
 
-> 💡 `revalidatePath` で一覧のキャッシュを捨て（→ 9-17）、`redirect` で完了後に画面遷移（→ 9-15）。`"use server"` の関数は**フォームの `action` に直接渡せる**のが核心
+> 💡 `revalidatePath` でキャッシュ破棄（→ 9-17）、`redirect` で画面遷移（→ 9-15）。`"use server"` 関数は `<form action>` に**直接渡せる**のが核心
 
 ---
 
@@ -697,29 +749,53 @@ export default ActionWithServer;
 > サーバー関数を**普通の async 関数として import** → ハイブリッド構成
 
 ```tsx
-// src/components/ActionWithClient.tsx
+// src/components/ActionWithClient.tsx（import・className のみ省略）
 "use client";
-import React from "react";
-import { useRouter } from "next/navigation";
-import { actionCalledClient } from "../actions/action-called-client";
-
 const ActionWithClient = () => {
   const router = useRouter();
-  const [info, setInfo] = React.useState({ name: "", email: "" });
-  const [loading, setLoading] = React.useState(false);
-  const [errors, setErrors] = React.useState<string[]>([]);
+  const [info, setInfo] = React.useState({ name: "", email: "" });    // ① 入力値
+  const [loading, setLoading] = React.useState(false);                // ② 送信中
+  const [errors, setErrors] = React.useState<string[]>([]);           // ③ エラー
+  const onChangeInfo = (e: React.ChangeEvent<HTMLInputElement>) => setInfo({ ...info, [e.target.name]: e.target.value });
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setLoading(true);
-    const res = await actionCalledClient(info.name, info.email); // 関数として呼ぶ
-    setLoading(false);
-    if (res.success) router.push("/static-rendering"); else setErrors(res.errors);
+    e.preventDefault(); setErrors([]); setLoading(true);
+    const res = await actionCalledClient(info.name, info.email);      // 👈 関数として呼ぶ
+    setLoading(false); if (res.success) router.push("/static-rendering"); else setErrors(res.errors);
   };
-  return <form onSubmit={handleSubmit}>...</form>;
+  return (<form onSubmit={handleSubmit}>
+    <input type="text" name="name" value={info.name} onChange={onChangeInfo} />
+    <input type="email" name="email" value={info.email} onChange={onChangeInfo} />
+    {errors.length > 0 && <ul>{errors.map(er => <li key={er}>{ERROR_MESSAGE[er]}</li>)}</ul>}
+    <button type="submit" disabled={loading}>{loading ? "Loading..." : "Create"}</button>
+  </form>);
 };
 ```
 
-> ⚠️ UX は向上。ただし送信状態(loading)もエラーもサーバーの状態を**手動で複製・同期**している → 抜けや不整合の温床。次で一掃
+> ⚠️ UX は向上。ただし送信状態(loading)もエラーもサーバーの状態を**手動で複製・同期**している → 抜けや不整合の温床。8-14 で一掃
+
+---
+
+## 8-13-2. 呼び出された側 — `actionCalledClient` の中身
+
+> 8-10 と違い **FormData を受け取らず、redirect もしない**。普通の async 関数だ
+
+```ts
+// src/actions/action-called-client.ts（骨子）
+"use server";
+import prisma from "../../lib/prisma";
+
+export const actionCalledClient = async (name: string, email: string) => {
+  const errors: string[] = [];
+  if (!name) errors.push("empty_name");
+  if (!email) errors.push("empty_email");
+  if (errors.length > 0) return { success: false, errors };  // ① 検証NGは値を返す
+  await prisma.user.create({ data: { name, email } });       // ② DB 保存
+  return { success: true };                                  // ③ redirect せず結果を返す
+};
+```
+
+> 💡 `"use server"` 関数は **form の action 専用ではない**。シリアライズ可能な引数・戻り値なら普通に import して呼べる（8-14 への布石）
+> ⚠️ ここでは `revalidatePath` を呼ばないため一覧には即反映されない。本デモは遷移確認用に `/static-rendering` へ push している
 
 ---
 
@@ -740,7 +816,7 @@ export const actionCalledClientWithActionState = async (
 ): Promise<State> => {
   const name = (formData.get("name") as string) ?? "";
   const email = (formData.get("email") as string) ?? "";
-  if (!name || !email) return { success: false, data: { name, email }, errors: ["empty"] };
+  if (!name || !email) return { success: false, data: { name, email }, errors: ["empty_name", "empty_email"] };
   try {
     await prisma.user.create({ data: { name, email } });
     return { success: true, data: { name, email } };
@@ -754,15 +830,15 @@ export const actionCalledClientWithActionState = async (
 
 ## 8-15. `useActionState` を用いた究極のクライアント実装
 
+> 🎯 **結論（Create）：** 8-13 の `useState`×3 ＋ handleSubmit が `useActionState` 1 行に。送信状態・エラー・入力保持が自動で揃う
+
 ```tsx
 // src/components/ActionWithActionState.tsx
 "use client";
 import React, { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { actionCalledClientWithActionState } from "@/actions/action-called-client-with-action-state";
-
 const initialState = { success: false, data: { name: "", email: "" }, errors: [] };
-
 const ActionWithActionState = () => {
   const router = useRouter();
   // 👇 [state, formAction, isPending] を一発で取得
@@ -783,15 +859,59 @@ const ActionWithActionState = () => {
 
 ---
 
+## 8-15-2. `useState` と `useActionState` の違い（早見表）
+
+> 🎯 同じフォームでも、状態を「自分で配線」するか「React に任せる」かの差
+
+| 観点 | `useState`（手書き） | `useActionState` |
+|---|---|---|
+| 送信中 | `setLoading` を手動 ON/OFF | `isPending` が自動（再描画完了まで true） |
+| エラー/結果 | `useState` で手動更新 | Action の戻り値が `state` に自動格納 |
+| 入力保持 | `value`＋`onChange` で管理 | `state.data`＋`defaultValue` |
+| 送信方法 | `onSubmit`＋`preventDefault`（JS必須） | `<form action>`（JS無しでも動く） |
+| Action の形 | `(name, email) => res` | `(prevState, formData) => newState` |
+
+> ⚠️ 代償：Action を `(prevState, formData)` の形に書き換える必要あり（→ 8-14）
+
+**結論：** `useState` は何にでも使える汎用フック。`useActionState` は**フォーム送信専用**で、送信中・エラー・入力保持の3点セットを自動配線する「特化版」。
+
+---
+
+## 8-15-3. `isPending` は「自分で管理しない」
+
+> 🎯 8-15 のコードに `setIsPending(true)` のような行は一切ない。切り替えは React が自動で行う
+
+**こちらがやることは3つだけ：**
+
+```tsx
+// ① フックから受け取る（3番目の値）
+const [state, formAction, isPending] = useActionState(...);
+// ② formAction を form に繋ぐ ← これが唯一の"配線"
+<form action={formAction}> ... </form>
+// ③ あとは読むだけ
+<button disabled={isPending}>{isPending ? "Loading..." : "Create"}</button>
+```
+
+```
+送信 → ② formAction 起動 → isPending = true（処理中…）
+     → 完了して新 state が返る → isPending = false（おわり）
+```
+
+> ⚠️ ②が肝：isPending が動く条件は **action が transition 内で呼ばれること**。`<form action={formAction}>` は自動で満たす（自前 `onSubmit` でも `startTransition` で包めば動く）
+
+---
+
 <!-- _class: summary -->
 
-## 第8章まとめ：API エンドポイント設計からの解放
+## 第8章まとめ — API エンドポイント設計からの解放
 
 > **フロント・バック統合：** Next.js 内に Prisma 等の ORM を入れるだけで、別サーバー / CORS 設定不要。安全に DB アクセス可能。
 
 > **Read は Server Component で：** `useEffect`+`fetch` を捨て、SC 内で `await prisma.findMany()` を直接呼ぶのが最速・最シンプル。
 
-> **CUD は Server Actions で：** POST API を捨て、`"use server"` 関数を直接呼ぶ。`isPending` で送信中ボタン無効化、サーバーエラーの即時表示も最小コードで実現。
+> **CUD（Create / Update / Delete）は Server Actions で：** POST API を捨て、`"use server"` 関数を直接呼ぶ。`isPending` で送信中ボタン無効化、サーバーエラーの即時表示も最小コードで実現。
+
+> ※ webhook 受信やモバイル向けなど**外部に公開する API** には Route Handlers を引き続き使う（→ 前半 7-10）
 
 **結論：** 「JSON の形」「URL 設計」という本質ではない作業から解放され、**UI とデータロジックだけに 100% 集中できる**真のフルスタック・アーキテクチャの完成形。
 
@@ -822,7 +942,7 @@ const ActionWithActionState = () => {
 
 ## 9-1. `<Link>` コンポーネントとプリフェッチの魔法
 
-> 遷移は **`<Link>` 必須**。差分だけ取りに行く「ソフトナビ」と自動プリフェッチで爆速
+> **〔9章 ①/⑤：Link 編〕** 遷移は **`<Link>` 必須**。差分だけ取る「ソフトナビ」と自動プリフェッチで爆速
 
 | | `<a href>` | `<Link href>` |
 |---|---|---|
@@ -865,7 +985,7 @@ import Link from "next/link";
 
 ## 9-3. `<Image>` コンポーネントの基本
 
-> 巨大画像は **LCP** 悪化の元凶。素の `<img>` は原寸をそのまま配信するから重い。`<Image>` は **配信時に自動リサイズ＋圧縮＋WebP 変換** して「必要なだけの画像」に削る
+> **〔9章 ②/⑤：Image 編〕** 巨大画像は **LCP** 悪化の元凶。`<Image>` は**配信時に自動リサイズ＋圧縮＋WebP 変換**で「必要なだけの画像」に削る
 
 ```tsx
 // src/app/(practice)/images/page.tsx
@@ -900,13 +1020,13 @@ export default ImagesPage;
 <!-- 実際の DOM 出力（DevTools の Elements タブで確認） -->
 <img
   src="/_next/image?url=%2F150x150.png&w=384&q=75"
-  width="150" height="150" alt="サンプル画像"
+  width="150" height="150" alt="Sample Image"
 />
 ```
 
 **URL パラメータの意味：**
 - `/_next/image` … 画像処理用の URL（**エンドポイント** = サーバーが受け付ける窓口）
-- `w=384` … **Retina**（高精細ディスプレイ：iPhone/Mac 等）用に**2倍以上の解像度**で自動生成
+- `w=384` … この表示に必要な画像の横幅(px)。**画面幅・`sizes`・倍率(Retina)で変わる**（→ 詳細 9-7-2）
 - `q=75` … 画質を 75% に自動圧縮（見た目はほぼ変わらず容量大幅減）
 
 > 💡 サーバーがアクセス時にリアルタイム生成・キャッシュ。2回目以降は瞬時に返る
@@ -952,7 +1072,7 @@ DevTools > Network タブ > Img フィルタ
 ```
 
 > 💡 **`position: relative`** = `fill` の `<Image>` の位置基準を親に固定する CSS／ **`objectFit:"cover"`** = 縦横比を保って親を埋める（はみ出しは切り取り）
-> ⚠️ Next.js 13 で `objectFit` 単体 prop は**廃止**。今は `style={{ objectFit: "cover" }}` と書くのが正解（古い記事の `objectFit="cover"` は効かない）
+> ⚠️ Next.js 13 で `objectFit` 単体 prop は**廃止**。今は `style={{ objectFit: "cover" }}` と書く（古い書き方は dev で警告が出て、将来動かなくなる）
 
 ---
 
@@ -980,6 +1100,30 @@ DevTools > Network タブ > Img フィルタ
 - 縮める → 既に綺麗な画像があるので再取得なし
 
 > 💡 **`100vw`** = 画面幅の 100%（**vw** = viewport width）／ **`50vw`** = 画面幅の半分
+
+---
+
+## 9-7-2. `w` の数字はどう決まる？ — 画面幅しだい
+
+> 🎯 9-4 の `w=384` は固定値じゃない。**「画面幅 × `sizes`の割合 × 画面の倍率」** をブラウザが計算し、候補から自動で選ぶ
+
+```
+必要なピクセル = 画面幅 × sizes(何%) × 倍率（普通=1 / Retina=2）
+→ Next.js が用意した候補から「足りる中で一番小さい w」を選ぶ
+```
+
+`sizes="(max-width: 64rem) 50vw, 25vw"`（9-7）の例：
+
+| 画面幅 | 画像の表示幅 | 普通の画面 | Retina(2倍) |
+|---|---|---|---|
+| 1440px（PC） | 25vw=360px | `w=384` | `w=750` |
+| 768px（スマホ） | 50vw=384px | `w=384` | `w=828` |
+
+> 💡 だから `w=384` は「Retina専用」ではなく、**PCの普通画面でも選ばれる**。画面幅と `sizes` の影響の方が大きい
+
+**候補リストの正体**（`next.config.ts` 未設定 → デフォルト）：`deviceSizes` = 640/750/828/1080/1200/1920/2048/3840（画面幅用）＋ `imageSizes` = 32/48/64/96/128/256/**384**（画面より小さい画像用）
+
+> ⚠️ `sizes` を付け忘れると「画面幅いっぱい(100vw)」扱い → 無駄にデカい画像を取得してしまう
 
 ---
 
@@ -1063,7 +1207,7 @@ export default nextConfig;
 
 ## 9-11. クライアントナビゲーションの主役：`useRouter`
 
-> `<Link>` はリンク用。**JS イベント起点の遷移**は `useRouter` を使う
+> **〔9章 ③/⑤：ナビフック編〕** `<Link>` はリンク用。**JS イベント起点の遷移**は `useRouter` を使う
 
 ```tsx
 // src/components/NavigationHooks.tsx
@@ -1113,6 +1257,8 @@ router.refresh();
 
 ## 9-13. パスとクエリの取得：`usePathname` / `useSearchParams`
 
+> 今いる URL の情報（パス／クエリ）を CC で読み取る2つのフック
+
 ```tsx
 "use client";
 import { usePathname, useSearchParams } from "next/navigation";
@@ -1134,12 +1280,13 @@ export function SearchResult() {
 ```
 
 > 💡 サイドバーのアクティブ表示、検索結果、ページネーション等で必須
+> ⚠️ `useSearchParams` を使う CC は `<Suspense>` で包むこと。dev では動くが、包み忘れると**静的ページの本番ビルドが失敗**する
 
 ---
 
 ## 9-14. サーバー専用関数：`cookies`
 
-> Cookie の**読み取り**は SC でもできるが、**書き込み（set / delete）は Server Action か Route Handler の中だけ**（SC のレンダリング中は不可）。ログイン状態を覚える「**セッショントークン**」の読み書き等に使う
+> **〔9章 ④/⑤：サーバー専用関数編〕** Cookie の読み取りは SC でも可。**書き込み（set / delete）は Server Action / Route Handler の中だけ**
 > 💡 **Cookie** = ブラウザに保存される小さなデータ（ログイン状態の保持等に使用）
 
 ```ts
@@ -1153,14 +1300,13 @@ export const login = async () => {
   cookieStore.set("token", "abc");          // 👈 Cookie に保存
   redirect("/static-rendering");             // 👈 完了後リダイレクト
 };
-```
 
-```ts
 // src/actions/logout.ts
 "use server";
 import { cookies } from "next/headers";
 export const logout = async () => {
   (await cookies()).delete("token");         // 👈 Cookie を削除
+  redirect("/static-rendering");
 };
 ```
 
@@ -1168,9 +1314,9 @@ export const logout = async () => {
 
 ---
 
-## 9-15. サーバー専用関数：`redirect` と `notFound`
+## 9-15. 処理を強制中断して転送：`redirect` と `notFound`
 
-> 認証 NG・データ不在時に、サーバー側で**処理を強制中断＆転送**
+> 認証 NG・データ不在時に、レンダリングを**強制中断＆転送**
 
 ```tsx
 import { cookies } from "next/headers";
@@ -1189,6 +1335,7 @@ export default async function Dashboard() {
 **`redirect` vs `router.push`：**
 - `redirect`：サーバーで **HTTP リダイレクト**を返す（SC からなら 307、**Server Action からなら 303**）。**内部で例外を投げる**ため後続コードは実行されない
 - `router.push`：ブラウザの JavaScript で DOM（画面の構造）を書き換え
+- `redirect` は CC の**レンダリング中**でも呼べるが、**イベントハンドラ内は不可**（そこは `router.push`）
 
 ---
 
@@ -1206,9 +1353,7 @@ export async function createUser(formData: FormData) {
     console.error(error);        // ここに redirect エラーが入る！
   }
 }
-```
 
-```ts
 // ✅ 正解：redirect は try-catch の外
 export async function createUser(formData: FormData) {
   try {
@@ -1220,15 +1365,15 @@ export async function createUser(formData: FormData) {
 }
 ```
 
-> 💡 どうしても try の中で呼ぶなら、catch 先頭で `unstable_rethrow(error)`（`next/navigation`）を呼べば redirect / notFound の内部例外だけ正しく素通しできる
+> 💡 どうしても try の中で呼ぶなら、catch 先頭で `unstable_rethrow(error)` を呼べば redirect / notFound の内部例外だけ素通しできる
 
 ---
 
-## 9-17. オンデマンド・キャッシュ更新:`revalidatePath`
+## 9-17. オンデマンド・キャッシュ更新：`revalidatePath`
 
-> 静的ページのキャッシュを**ピンポイントで破棄**。次回アクセスで最新 HTML が再構築
+> **〔9章 ⑤/⑤：キャッシュ操作編〕** 静的ページのキャッシュを**ピンポイントで破棄**。次回アクセスで最新 HTML に再構築
 
-**問題：** Server Action で新規ユーザー保存 → 一覧（`/users`）が Static Rendering なら**古いキャッシュが返り続け**、新ユーザーが表示されない
+**問題：** Server Action で新規ユーザー保存 → 一覧（`/get-data-from-server-component`）が Static Rendering なら**古いキャッシュが返り続け**、新ユーザーが表示されない
 
 ```ts
 // src/actions/action-called-sever.ts より抜粋
@@ -1251,9 +1396,9 @@ export const actionCalledServer = async (formData: FormData) => {
 
 ---
 
-## 9-18. タグによる柔軟なキャッシュ破棄:`updateTag`
+## 9-18. タグによる柔軟なキャッシュ破棄：`updateTag`
 
-> 「複数ページに跨る同じデータ」を**横断的に**破棄したい時に使う
+> 「複数ページに跨る同じデータ」を**横断的に**破棄したい時に使う（前半 6-4 で触れた破棄 API の v16 実践編）
 
 ```tsx
 // src/components/DataCache1.tsx より：取得時にタグを付ける
@@ -1276,27 +1421,49 @@ export const refreshTodo = async () => {
 ```
 
 > 💡 fetch 側の `tags: ["todo"]` と `updateTag("todo")` は**同じ名前**で対応（ズレると破棄されない）
-> 💡 `updateTag` は `revalidateTag` の改名では**ない別物**：`updateTag`＝即時無効化・Server Action 専用（自分の書き込みを即反映）／`revalidateTag`＝古い内容を返しつつ裏で更新・Route Handler でも可
+> 💡 `updateTag`＝即時失効・**Server Action 専用**（自分の書き込みを即反映）。`revalidateTag` は別物で **Route Handler でも可**——v16 は **第2引数 `"max"` 推奨**：`revalidateTag("todo","max")`（古い内容を返しつつ裏で更新）。1引数は**非推奨**（TSエラー・将来削除の可能性）
+
+---
+
+## 9-18-2. タグ破棄は「どんな時」に使う？
+
+> 🎯 ①タグ方式が向く場面 ＋ ②`updateTag` と `revalidateTag` の使い分け、の2点で覚える
+
+**① 同じデータが複数ページに散らばってる時**に効く
+例：プロフィール情報がヘッダー・マイページ・コメント欄…と何ヶ所にも出る
+→ 全 fetch に `tags:["profile"]` を付け、編集時 `updateTag("profile")` **一発で全部更新**（パス指定だと1ページずつ書く必要があり面倒）
+
+**② どっちを使う？（合言葉：自分の変更を即見せたい→`updateTag`）**
+
+| 使いたい場面 | 関数 |
+|---|---|
+| 操作を**即・自分の画面に反映**（TODO追加・投稿・プロフィール編集・カート・いいね） | `updateTag`（即時／SA専用） |
+| 裏で更新されればOK・多少古くても速さ優先（ブログ・商品カタログ・docs） | `revalidateTag(t,"max")` |
+| **webhook / 外部API** から破棄（CMS更新通知など） | `revalidateTag`（Route Handler可） |
+
+> 💡 「ユーザーが今やった変更をすぐ見せる」なら `updateTag`、「裏でこっそり最新化」なら `revalidateTag`
 
 ---
 
 <!-- _class: summary -->
 
-## 第9章まとめ：機能 × 使える場所の早見表
+## 第9章まとめ — 機能 × 使える場所の早見表
 
 | 機能 | SC | CC | Server Action |
 |---|---|---|---|
 | `<Link>` / `<Image>` | ✅ | ✅ | ❌ |
 | `useRouter` / `usePathname` / `useSearchParams` | ❌ | ✅ | ❌ |
 | `cookies` | ✅ | ❌ | ✅ |
-| `revalidatePath` / `revalidateTag` | ❌ | ❌ | ✅ |
+| `revalidatePath` / `updateTag`・`revalidateTag` | ❌ | ❌ | ✅ |
 | `redirect` / `notFound` | ✅ | ✅ | ✅ |
+
+> ※ `revalidatePath` / `revalidateTag` は **Route Handler でも呼べる**（webhook からの On-Demand ISR が典型）。Server Action **専用**なのは `updateTag`
 
 > **フロントエンド最適化の完全自動化：** `<Link>` 自動プリフェッチと `<Image>` の WebP/sizes/CLS 防止で **Core Web Vitals** が跳ね上がる
 
-> **キャッシュの完全支配：** `revalidatePath` / `revalidateTag` で多層キャッシュを操り、**爆速とリアルタイム性**を両立
+> **キャッシュの完全支配：** `revalidatePath` / `updateTag` で多層キャッシュを操り、**爆速とリアルタイム性**を両立
 
-**結論：** 関数には**動く場所（SC / CC / Server Action）が決まっている**。場所を間違えればエラー、キャッシュ破棄を忘れれば古い表示——**「どこで何が使えるか」を押さえることが、バグらせずに爆速とリアルタイム性を両立する唯一の道**
+**結論：** 関数には**動く場所（SC / CC / Server Action / Route Handler）が決まっている**。場所を間違えればエラー、キャッシュ破棄を忘れれば古い表示——**「どこで何が使えるか」を押さえることが、バグらせずに爆速とリアルタイム性を両立する唯一の道**
 
 ---
 
@@ -1322,7 +1489,7 @@ export const refreshTodo = async () => {
 
 ---
 
-## 10-1. フロントエンド進化の歴史と Next.js の存在意義
+## 10-1. フロントエンド進化の歴史と Next.js の存在意義（→ 第1章）
 
 > SPA の2大弱点（**初期表示遅・SEO 弱**）を Next.js が根本解決
 
@@ -1341,13 +1508,13 @@ Next.js         ─ サーバーで完全な HTML を組み立てて配信
 
 ---
 
-## 10-2. React Server Components (RSC) という大革命
+## 10-2. React Server Components (RSC) という大革命（→ 第3章）
 
 > **デフォルト SC・末端のみ CC**。CC の中で直接 SC を import できないが、`children` で**注入**すれば回避できる（= コンポジションパターン）
 
 ```tsx
 // Server Component（デフォルト：サーバー実行・JS 0KB）
-import prisma from "@/lib/prisma";   // 👈 default import
+import prisma from "../../lib/prisma";   // 👈 lib/ は src/ の外なので相対パス（→ 8-4）
 export default async function Page() {
   const users = await prisma.user.findMany();
   return <ClientShell><UserList users={users} /></ClientShell>;
@@ -1366,7 +1533,7 @@ export function ClientShell({ children }: { children: React.ReactNode }) {
 
 ---
 
-## 10-3. ファイルシステムベース・ルーティングの魔法
+## 10-3. ファイルシステムベース・ルーティングの魔法（→ 第7章）
 
 > **規約 > 設定**。フォルダ構造だけでルーティング・レイアウト・ローディングが完成
 
@@ -1387,7 +1554,7 @@ src/app/
 
 ---
 
-## 10-4. レンダリング戦略の自動最適化
+## 10-4. レンダリング戦略の自動最適化（→ 第4章）
 
 > 開発者が手動切替不要。**コードを読んで Next.js が自動判定**
 
@@ -1406,11 +1573,11 @@ export default async function Dashboard() {
 }
 ```
 
-**自動 Dynamic 切替（Request-time API）：** `cookies()` / `headers()` / `searchParams`（`connection()` で明示的に Dynamic 化も可）。`fetch(..., { cache: "no-store" })` は『データのキャッシュ無効化』指定で、Dynamic 切替トリガーとは別物
+**自動 Dynamic 切替のトリガーは2系統：** ① Request-time API＝`cookies()` / `headers()` / `searchParams`（`connection()` で明示も可）② キャッシュしない fetch＝`cache: "no-store"` / `revalidate: 0`（→ 前半 4-2・5-9）
 
 ---
 
-## 10-5. データ取得の常識を覆す Streaming SSR
+## 10-5. データ取得の常識を覆す Streaming SSR（→ 第5章）
 
 > **本質：旧来はブラウザから API を往復して取りに行くから「空表示→取得→再描画」になる**
 > → 新方式は async SC でサーバー側が直接 await。`useEffect` + `useState` の手組みごと不要に
@@ -1436,7 +1603,7 @@ async function HeavyPart() {
 
 ---
 
-## 10-6. 範囲と速度が違う4層を重ねる「キャッシュアーキテクチャ」
+## 10-6. 範囲と速度が違う4層キャッシュアーキテクチャ（→ 第6章）
 
 | # | 層 | 保存場所 | 範囲 | 生存期間 |
 |---|---|---|---|---|
@@ -1457,7 +1624,7 @@ updateTag("todo");              // タグ横断・即時無効化（v16新／rev
 
 ---
 
-## 10-7. API レス時代の到来：真のフルスタック化
+## 10-7. API レス時代の到来：真のフルスタック化（→ 第8章）
 
 > フロントとバックの境界が論理的に消滅。**1言語（TypeScript）で完結**
 
@@ -1484,7 +1651,7 @@ const [state, formAction, isPending] = useActionState(createUser, initialState);
 
 ---
 
-## 10-8. Next.js 特有の強力な組み込み機能群
+## 10-8. Next.js 特有の強力な組み込み機能群（→ 第9章）
 
 ```tsx
 // ① <Image>：WebP 自動変換（AVIF は config で有効化）・遅延読込・CLS 防止
@@ -1519,7 +1686,7 @@ if (!token) redirect("/login");
 ─ Server Actions による API レス開発
 ─ Prisma + ORM での型安全なデータ層構築
 ─ Core Web Vitals（LCP / CLS）を意識した UI 最適化
-─ セキュリティ（DB 接続情報の境界・remotePatterns・CSRF）
+─ セキュリティ（DB 接続情報の境界・remotePatterns）
 ```
 
 > 💡 Next.js App Router を正しく理解しベストプラクティスで構築できる人材は、現在の Web 業界で圧倒的に不足している

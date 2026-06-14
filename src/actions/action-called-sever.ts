@@ -4,8 +4,6 @@ import { ERROR_MESSAGE } from "@/constants"
 import { redirect } from "next/navigation"
 import { revalidatePath } from "next/cache"
 import prisma from "../../lib/prisma"
-import { cookies } from "next/headers"
-import { NextResponse } from "next/server"
 
 export const actionCalledServer = async (formData: FormData) => {
   const nameEntry = formData.get("name") as string
@@ -44,5 +42,5 @@ export const actionCalledServer = async (formData: FormData) => {
     redirectTo = `/call-server-action?${params.toString()}`
   }
   revalidatePath("/get-data-from-server-component")
-  redirectTo = "/get-data-from-server-component"
+  redirect(redirectTo)
 }
